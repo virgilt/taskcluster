@@ -1,0 +1,10 @@
+project_name: "taskcluster-references"
+secrets:
+  application_name: my-cool-cluster
+deployments:
+  - service_name: "references"
+    prod_name: "web"
+    secret_name: "taskcluster-references"
+    root_url: "{{ .Values.root_url }}"
+    docker_image: "{{ .Values.docker_image }}"
+    readiness_path: "/references/"
