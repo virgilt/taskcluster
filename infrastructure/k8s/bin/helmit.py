@@ -5,7 +5,6 @@ import glob
 import jsone
 import yaml
 
-# todo: pass secret keys to deployment
 # todo: cronjob
 # todo: decide on file structure to output
 # todo: add secret hash calculation to deployment
@@ -21,7 +20,7 @@ def format_secrets(secrets):
             secrets[key] = f'"{value}"'
 
 
-# since non0secrets aren't interpolated into existing template expression
+# since non-secrets aren't interpolated into existing template expression
 # need to turn them into that
 def format_values(context):
     for key, value in context.items():
@@ -29,7 +28,7 @@ def format_values(context):
             context[key] = "{{ " + value + " }}"
 
 
-def render_service_account(project_name):
+def render_rbac(project_name):
     context = {"project_name": project_name}
     for template in ("role", "role-binding", "service-account"):
         template = yaml.load(open(f"templates/{template}.yaml"), Loader=yaml.SafeLoader)
@@ -45,12 +44,12 @@ def render_secrets(project_name, secrets):
     print(yaml.dump(jsone.render(template, context)))
 
 
-def render_deployment(project_name, deployment):
+def render_deployment(project_name, secret_keys, deployment):
     # default values
     context = {
         "project_name": project_name,
+        "secret_keys": secret_keys,
         "volume_mounts": [],
-        "secret_keys": [],
         "readiness_path": "/",
         "proc_name": False,
         "cpu": "50m",
@@ -82,10 +81,11 @@ else:
 for p in service_declarations:
     declaration = yaml.load(open(p), Loader=yaml.SafeLoader)
     project_name = declaration["project_name"]
-    if "secrets" in declaration:
-        render_secrets(project_name, declaration["secrets"])
-        render_service_account(project_name)
+    secret_keys = list(declaration["secrets"].keys())
+
+    render_secrets(project_name, declaration["secrets"])
+    render_rbac(project_name)
     for deployment in declaration.get("deployments", []):
-        render_deployment(project_name, deployment)
+        render_deployment(project_name, secret_keys, deployment)
     for cronjob in declaration.get("cronjobs", []):
         render_cronjob(cronjob)
