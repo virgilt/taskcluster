@@ -10,18 +10,28 @@ import yaml
 # todo: cronjob
 # todo: make things work no matter cwd and os
 
+# secrets are interpolated by json-e into this helm expression
+# "{{ secret | b64enc }}"
+# to make this work if a literal, quote it
+# if a value being interpoloated by helm, leave it alone
+def escape_secrets(secrets):
+    for key, value in secrets.items():
+        if not value.startswith("."):
+            secrets[key] = f'"{value}"'
+
 
 def render_service_account(project_name):
     return
     context = {"project_name": project_name}
     template = yaml.load(open("templates/service-account.yaml"), Loader=yaml.SafeLoader)
-    print(jsone.render(template, context))
+    print(yaml.dump(jsone.render(template, context)))
 
 
 def render_secrets(project_name, secrets):
+    escape_secrets(secrets)
     context = {"project_name": project_name, "secrets": secrets}
     template = yaml.load(open("templates/secret.yaml"), Loader=yaml.SafeLoader)
-    print(jsone.render(template, context))
+    print(yaml.dump(jsone.render(template, context)))
 
 
 def render_deployment(declaration):
