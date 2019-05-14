@@ -5,7 +5,6 @@ import glob
 import jsone
 import yaml
 
-# todo split service account yaml into three files
 # todo: deployment
 # todo: cronjob
 # todo: make things work no matter cwd and os
@@ -21,16 +20,18 @@ def escape_secrets(secrets):
 
 
 def render_service_account(project_name):
-    return
     context = {"project_name": project_name}
-    template = yaml.load(open("templates/service-account.yaml"), Loader=yaml.SafeLoader)
-    print(yaml.dump(jsone.render(template, context)))
+    for template in ("role", "role-binding", "service-account"):
+        template = yaml.load(open(f"templates/{template}.yaml"), Loader=yaml.SafeLoader)
+        print("---")
+        print(yaml.dump(jsone.render(template, context)))
 
 
 def render_secrets(project_name, secrets):
     escape_secrets(secrets)
     context = {"project_name": project_name, "secrets": secrets}
     template = yaml.load(open("templates/secret.yaml"), Loader=yaml.SafeLoader)
+    print("---")
     print(yaml.dump(jsone.render(template, context)))
 
 
