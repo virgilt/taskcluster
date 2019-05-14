@@ -5,7 +5,7 @@ import glob
 import jsone
 import yaml
 
-# todo: cronjob
+# todo: make helm consitentlyCamelCase
 # todo: decide on file structure to output
 # todo: add secret hash calculation to deployment
 # todo: make things work no matter cwd and os
