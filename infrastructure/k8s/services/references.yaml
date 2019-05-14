@@ -1,7 +1,6 @@
 project_name: "taskcluster-references"
 secrets:
   application_name: "my-cool-cluster"
-  a_secret: ".Values.root_url"
 deployments:
   - service_name: "references"
     proc_name: "web"
