@@ -45,10 +45,10 @@ def render_secrets(project_name, secrets):
 
 
 def render_deployment(project_name, secret_keys, deployment):
-    # default values
     context = {
         "project_name": project_name,
         "secret_keys": secret_keys,
+        # below are default values
         "volume_mounts": [],
         "readiness_path": "/",
         "proc_name": False,
@@ -65,8 +65,19 @@ def render_deployment(project_name, secret_keys, deployment):
     print(yaml.dump(jsone.render(template, context)))
 
 
-def render_cronjob(declaration):
-    pass
+def render_cronjob(project_name, secret_keys, deployment):
+    context = {
+        "project_name": project_name,
+        "secret_keys": secret_keys,
+        # below are default values
+        "volume_mounts": [],
+        "is_monoimage": True,
+    }
+    context.update(deployment)
+    format_values(context)
+    template = yaml.load(open("templates/cron-job.yaml"), Loader=yaml.SafeLoader)
+    print("---")
+    print(yaml.dump(jsone.render(template, context)))
 
 
 parser = argparse.ArgumentParser()
@@ -88,4 +99,4 @@ for p in service_declarations:
     for deployment in declaration.get("deployments", []):
         render_deployment(project_name, secret_keys, deployment)
     for cronjob in declaration.get("cronjobs", []):
-        render_cronjob(cronjob)
+        render_cronjob(project_name, secret_keys, cronjob)
