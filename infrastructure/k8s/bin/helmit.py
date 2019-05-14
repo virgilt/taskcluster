@@ -52,12 +52,12 @@ def render_deployment(project_name, deployment):
         "volume_mounts": [],
         "secret_keys": [],
         "readiness_path": "/",
-        "proc_name": "false",
+        "proc_name": False,
         "cpu": "50m",
         "memory": "100Mi",
         "replicas": "1",
-        "background_job": "false",
-        "is_monoimage": "true",
+        "background_job": False,
+        "is_monoimage": True,
     }
     context.update(deployment)
     format_values(context)
