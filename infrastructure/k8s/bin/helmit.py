@@ -5,18 +5,28 @@ import glob
 import jsone
 import yaml
 
-# todo: deployment
+# todo: pass secret keys to deployment
 # todo: cronjob
+# todo: decide on file structure to output
+# todo: add secret hash calculation to deployment
 # todo: make things work no matter cwd and os
 
-# secrets are interpolated by json-e into this helm expression
+# secrets are interpolated by json-e into this goland template expression
 # "{{ secret | b64enc }}"
 # to make this work if a literal, quote it
 # if a value being interpoloated by helm, leave it alone
-def escape_secrets(secrets):
+def format_secrets(secrets):
     for key, value in secrets.items():
         if not value.startswith("."):
             secrets[key] = f'"{value}"'
+
+
+# since non0secrets aren't interpolated into existing template expression
+# need to turn them into that
+def format_values(context):
+    for key, value in context.items():
+        if isinstance(value, str) and value.startswith("."):
+            context[key] = "{{ " + value + " }}"
 
 
 def render_service_account(project_name):
@@ -28,15 +38,32 @@ def render_service_account(project_name):
 
 
 def render_secrets(project_name, secrets):
-    escape_secrets(secrets)
+    format_secrets(secrets)
     context = {"project_name": project_name, "secrets": secrets}
     template = yaml.load(open("templates/secret.yaml"), Loader=yaml.SafeLoader)
     print("---")
     print(yaml.dump(jsone.render(template, context)))
 
 
-def render_deployment(declaration):
-    pass
+def render_deployment(project_name, deployment):
+    # default values
+    context = {
+        "project_name": project_name,
+        "volume_mounts": [],
+        "secret_keys": [],
+        "readiness_path": "/",
+        "proc_name": "false",
+        "cpu": "50m",
+        "memory": "100Mi",
+        "replicas": "1",
+        "background_job": "false",
+        "is_monoimage": "true",
+    }
+    context.update(deployment)
+    format_values(context)
+    template = yaml.load(open("templates/deployment.yaml"), Loader=yaml.SafeLoader)
+    print("---")
+    print(yaml.dump(jsone.render(template, context)))
 
 
 def render_cronjob(declaration):
@@ -59,6 +86,6 @@ for p in service_declarations:
         render_secrets(project_name, declaration["secrets"])
         render_service_account(project_name)
     for deployment in declaration.get("deployments", []):
-        render_deployment(deployment)
+        render_deployment(project_name, deployment)
     for cronjob in declaration.get("cronjobs", []):
         render_cronjob(cronjob)
