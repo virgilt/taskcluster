@@ -4,10 +4,13 @@ import argparse
 import glob
 import jsone
 import yaml
+import os
 
 # todo: decide on file structure to output
 # todo: add secret hash calculation to deployment
 # todo: make things work no matter cwd and os
+
+
 
 # secrets are interpolated by json-e into this goland template expression
 # "{{ secret | b64enc }}"
@@ -31,16 +34,18 @@ def render_rbac(project_name):
     context = {"project_name": project_name}
     for template in ("role", "role-binding", "service-account"):
         template = yaml.load(open(f"templates/{template}.yaml"), Loader=yaml.SafeLoader)
-        print("---")
-        print(yaml.dump(jsone.render(template, context)))
+        #print("---")
+        #print(yaml.dump(jsone.render(template, context)))
+        write_file(template, context, "rbac")
 
 
 def render_secrets(project_name, secrets):
     format_secrets(secrets)
     context = {"project_name": project_name, "secrets": secrets}
     template = yaml.load(open("templates/secret.yaml"), Loader=yaml.SafeLoader)
-    print("---")
-    print(yaml.dump(jsone.render(template, context)))
+    #print("---")
+    #print(yaml.dump(jsone.render(template, context)))
+    write_file(template, context, "secrets")
 
 
 def render_deployment(project_name, secret_keys, deployment):
@@ -60,9 +65,9 @@ def render_deployment(project_name, secret_keys, deployment):
     context.update(deployment)
     format_values(context)
     template = yaml.load(open("templates/deployment.yaml"), Loader=yaml.SafeLoader)
-    print("---")
-    print(yaml.dump(jsone.render(template, context)))
-
+    # print("---")
+    # print(yaml.dump(jsone.render(template, context)))
+    write_file(template, context, "deployment")
 
 def render_cronjob(project_name, secret_keys, deployment):
     context = {
@@ -75,13 +80,28 @@ def render_cronjob(project_name, secret_keys, deployment):
     context.update(deployment)
     format_values(context)
     template = yaml.load(open("templates/cron-job.yaml"), Loader=yaml.SafeLoader)
-    print("---")
-    print(yaml.dump(jsone.render(template, context)))
+    # print("---")
+    # print(yaml.dump(jsone.render(template, context)))
+    write_file(template, context, "cron")
 
+def write_file(template, context, prefix):
+    filename = chartsdir + "/taskcluster-" + prefix + "-" + p.split("/")[-1:][0]
+    try:
+        f = open(filename, "a+")
+        f.write(yaml.dump(jsone.render(template, context)))
+        f.close()
+    except: 
+        print("failed to write "+ filename)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--service", help="Name of the service to render", default=None)
 args = parser.parse_args()
+chartsdir = "charts"
+
+try:
+    os.mkdir(chartsdir)
+except:
+    pass
 
 if args.service:
     service_declarations = [f"services/{args.service}.yaml"]
