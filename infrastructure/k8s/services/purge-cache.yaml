@@ -12,8 +12,8 @@ deployments:
   - service_name: "purge-cache"
     proc_name: "web"
     secret_name: "taskcluster-purge-cache"
-    root_url: ".Values.root_url"
-    docker_image: ".Values.docker_image"
+    root_url: ".Values.rootUrl"
+    docker_image: ".Values.dockerImage"
     readiness_path: "/api/v1/cache/ping"
 cronjobs:
   - service_name: "purge-cache"
@@ -21,5 +21,5 @@ cronjobs:
     schedule: "0 0 * * *"
     deadline_seconds: 86400
     secret_name: "taskcluster-purge-cache"
-    root_url: ".Values.root_url"
-    docker_image: ".Values.docker_image"
+    root_url: ".Values.rootUrl"
+    docker_image: ".Values.dockerImage"

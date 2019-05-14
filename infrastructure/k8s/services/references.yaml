@@ -5,6 +5,6 @@ deployments:
   - service_name: "references"
     proc_name: "web"
     secret_name: "taskcluster-references"
-    root_url: ".Values.root_url"
-    docker_image: ".Values.docker_image"
+    root_url: ".Values.rootUrl"
+    docker_image: ".Values.dockerImage"
     readiness_path: "/references/"
