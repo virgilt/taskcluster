@@ -143,19 +143,13 @@ Client.syncStaticClients = async function(clients = [], azureAccountId) {
 
   // put the configured scopes into place
   clients = clients.map(client => {
-    if (client.clientId.startsWith('static/taskcluster/')) {
+    if (client.clientId === 'static/taskcluster/root') {
       const {scopes} = _.find(staticScopes, {clientId: client.clientId});
       return {...client, description: 'Internal client', scopes};
     } else {
       return client;
     }
   });
-
-  // substitute the azureAccountId into the scopes
-  clients = clients.map(client => ({
-    ...client,
-    scopes: client.scopes.map(sc => sc.replace(/\${azureAccountId}/g, azureAccountId)),
-  }));
 
   // description suffix to use for all static clients
   const descriptionSuffix = [
