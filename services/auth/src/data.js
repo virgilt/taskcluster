@@ -141,17 +141,6 @@ Client.syncStaticClients = async function(clients = [], azureAccountId) {
   const extraTCClients = _.difference(seenTCClients, expectedTCClients);
   const missingTCClients = _.difference(expectedTCClients, seenTCClients);
 
-  if (extraTCClients.length > 0 || missingTCClients.length > 0) {
-    let msg = 'Incorrect `static/taskcluster` static clients in STATIC_CLIENTS';
-    if (extraTCClients.length > 0) {
-      msg = msg + `; extra clients ${JSON.stringify(extraTCClients)}`;
-    }
-    if (missingTCClients.length > 0) {
-      msg = msg + `; missing clients ${JSON.stringify(missingTCClients)}`;
-    }
-    throw new Error(msg);
-  }
-
   // put the configured scopes into place
   clients = clients.map(client => {
     if (client.clientId.startsWith('static/taskcluster/')) {
