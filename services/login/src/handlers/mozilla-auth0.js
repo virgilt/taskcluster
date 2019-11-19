@@ -64,6 +64,7 @@ class Handler {
 
     // parse the token just enough to figure out when it expires
     let decoded = jwt.decode(token);
+    console.log(decoded);
     let expires = decoded.exp;
 
     // create a new
