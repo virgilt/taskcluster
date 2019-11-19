@@ -64,7 +64,6 @@ class Handler {
 
     // parse the token just enough to figure out when it expires
     let decoded = jwt.decode(token);
-    console.log(decoded);
     let expires = decoded.exp;
 
     // create a new
@@ -111,6 +110,7 @@ class Handler {
       return;
     }
 
+    console.log(req.user);
     debug(`received valid access_token for subject ${req.user.sub}`);
 
     let scopes = req.user.scope ? req.user.scope.split(' ') : [];
