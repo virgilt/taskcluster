@@ -1,0 +1,11 @@
+query ListWorkerPoolErrors($workerPoolId: ID!){
+  workerPool(workerPoolId: $workerPoolId){
+    errors{
+      edges{
+        node{
+          title
+        }
+      }
+    }
+  }
+}

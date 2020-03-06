@@ -3,87 +3,47 @@ const sift = require('../utils/sift');
 const ConnectionLoader = require('../ConnectionLoader');
 
 module.exports = ({ workerManager }) => {
-  const WorkerManagerWorkerPoolSummaries = new DataLoader(queries =>
+  const Worker = new DataLoader(queries =>
     Promise.all(
-      queries.map(async ({ filter }) => {
-        try {
-          const summaries = (await workerManager.listWorkerPools()).workerPools;
-
-          return sift(filter, summaries);
-        } catch (err) {
-          return err;
-        }
+      queries.map(({ workerPoolId, workerGroup, workerId }) => {
+        return workerManager.worker(workerPoolId, workerGroup, workerId);
       }),
     ),
   );
 
   const WorkerPool = new DataLoader(queries =>
     Promise.all(
-      queries.map(async ({ workerPoolId }) => {
-        try {
-          return await workerManager.workerPool(workerPoolId);
-        } catch (err) {
-          return err;
-        }
+      queries.map(({ workerPoolId }) => {
+        return workerManager.workerPool(workerPoolId);
       }),
     ),
   );
 
-  // const WMWorkers = new DataLoader(queries =>
-  //   Promise.all(
-  //     queries.map(async (workerPool, isQuarantined, filter) => {
-  //       const workers = await workerManager.getWorkers(provisionerId, workerPool, isQuarantined);
-  //
-  //       return filter ? sift(filter, workers) : workers;
-  //     })
-  //   )
-  // );
+  const WorkerPools = new ConnectionLoader(
+    async ({ filter, options }) => {
+      const raw = await workerManager.listWorkerPools(options);
+      const pools = sift(filter, raw.workerPools);
 
-  const WorkerManagerWorkers = new DataLoader(queries => {
-    return Promise.all(
-      queries.map(({ workerPool, provider, isQuarantined, filter }) => {
-        try {
-          const summaries = [
-            {
-              workerId: 'rust-awesomness',
-              workerGroup: '🦀',
-              workerAge: new Date('December 17, 1995 03:24:00'),
+      return {
+        ...raw,
+        items: pools,
+      };
+    },
+  );
 
-              latestTaskRun: {
-                taskId: '832bfhi23',
-                runId: 0,
-                state: 'failed',
-                reasonCreated: 'scheduled',
-                reasonResolved: 'failed',
-                workerGroup: 'nyancat',
-                workerId: 'jhsdfg87w3',
-                takenUntil: new Date('December 17, 2000 03:24:00'),
-                scheduled: new Date('December 17, 1993 03:24:00'),
-                started: new Date('December 17, 1994 03:24:00'),
-                resolved: new Date('December 17, 1997 03:24:00'),
-                artifacts: {},
-              },
+  const Workers = new ConnectionLoader(
+    async ({ workerPoolId, filter, options }) => {
+      const raw = await workerManager.listWorkersForWorkerPool(workerPoolId, options);
+      const workers = sift(filter, raw.workers);
 
-              workerPool: 'banana',
-              providerId: 'gcp',
-              latestTaskStatus: 'great success',
+      return {
+        ...raw,
+        items: workers,
+      };
+    },
+  );
 
-              quarantineUntil: new Date('December 17, 2095 03:24:00'),
-              recentErrors: 2,
-              latestStarted: new Date(),
-              latestResolved: new Date(),
-            },
-          ];
-
-          return Promise.resolve(sift(filter, summaries));
-        } catch (err) {
-          return err;
-        }
-      }),
-    );
-  });
-
-  const WorkerManagerErrors = new ConnectionLoader(
+  const WorkerPoolErrors = new ConnectionLoader(
     async ({ workerPoolId, filter, options }) => {
       const raw = await workerManager.listWorkerPoolErrors(workerPoolId, options);
       const errors = sift(filter, raw.workerPoolErrors);
@@ -95,7 +55,7 @@ module.exports = ({ workerManager }) => {
     },
   );
 
-  const WorkerManagerProviders = new ConnectionLoader(
+  const Providers = new ConnectionLoader(
     async ({ filter, options }) => {
       const raw = await workerManager.listProviders(options);
       const providers = sift(filter, raw.providers);
@@ -108,10 +68,11 @@ module.exports = ({ workerManager }) => {
   );
 
   return {
-    WorkerManagerWorkerPoolSummaries,
-    WorkerManagerWorkers,
-    WorkerManagerErrors,
+    Worker,
+    Workers,
     WorkerPool,
-    WorkerManagerProviders,
+    WorkerPools,
+    Providers,
+    WorkerPoolErrors,
   };
 };

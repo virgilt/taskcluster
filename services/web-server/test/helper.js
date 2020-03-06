@@ -1,4 +1,5 @@
 const load = require('../src/main');
+const slugid = require('slugid');
 const taskcluster = require('taskcluster-client');
 const {Secrets, stickyLoader, withMonitor, withEntity, withPulse} = require('taskcluster-lib-testing');
 const sinon = require('sinon');
@@ -272,6 +273,7 @@ const stubbedAuth = () => {
 const stubbedClients = () => {
   const tasks = new Map();
   const roles = new Map();
+  const workerPools = new Map();
   const options = {
     rootUrl: exports.rootUrl,
   };
@@ -279,6 +281,7 @@ const stubbedClients = () => {
   teardown(() => {
     tasks.clear();
     roles.clear();
+    workerPools.clear();
   });
 
   return () => ({
@@ -289,7 +292,48 @@ const stubbedClients = () => {
     secrets: new taskcluster.Secrets(options),
     queueEvents: new taskcluster.QueueEvents(options),
     notify: new taskcluster.Notify(options),
-    workerManager: new taskcluster.WorkerManager(options),
+    workerManager: new taskcluster.WorkerManager({
+      ...options,
+      fake: {
+        createWorkerPool: async (workerPoolId, payload) => {
+          const wp = {
+            ...payload,
+            workerPoolId,
+            created: taskcluster.fromNowJSON(),
+            lastModified: taskcluster.fromNowJSON(),
+          };
+          workerPools.set(workerPoolId, wp);
+          return Promise.resolve(wp);
+        },
+        workerPool: async workerPoolId => workerPools.get(workerPoolId),
+        listWorkerPools: async ({limit = 1000}) => ({workerPools: [...workerPools.values()].slice(0, limit)}),
+        listWorkersForWorkerPool: async (workerPoolId) => ({workers: [
+          {
+            workerId: 'FOO',
+          },
+        ]}),
+        listWorkerPoolErrors: async (workerPoolId) => ({workerPoolErrors: [
+          {
+            description: `foo -- ${workerPoolId}`,
+            errorId: slugid.nice(),
+            extra: {},
+            kind: 'foo-bar',
+            reported: taskcluster.fromNowJSON(),
+            title: 'FOO',
+            workerPoolId,
+          },
+        ]}),
+        worker: async (workerPoolId, workerGroup, workerId) => ({workerPoolId, workerGroup, workerId}),
+        listProviders: async () => {
+          return {
+            providers: [{
+              providerId: 'foo',
+              providerType: 'bar',
+            }],
+          };
+        },
+      },
+    }),
     auth: new taskcluster.Auth({
       ...options,
       fake: {
@@ -385,6 +429,25 @@ const stubbedClients = () => {
 
           return Promise.resolve(taskStatus);
         },
+        pendingTasks: async (provisionerId, workerType) => ({provisionerId, workerType, pendingTasks: 10}),
+        getWorkerType: async (provisionerId, workerType) => ({
+          provisionerId,
+          workerType,
+          lastDateActive: taskcluster.fromNowJSON('-1 day'),
+          stability: 'experimental',
+          expires: taskcluster.fromNowJSON('1 week'),
+        }),
+        getWorker: async (provisionerId, workerType, workerGroup, workerId) => ({
+          firstClaim: taskcluster.fromNowJSON(),
+          quarantineUntil: taskcluster.fromNowJSON('1 week'),
+          expires: taskcluster.fromNowJSON('2 weeks'),
+          recentTasks: [
+            {
+              runId: 0,
+              taskId: 'XKi8QH-lRF-_gJWMD3IGFg',
+            },
+          ],
+        }),
       },
     }),
   });

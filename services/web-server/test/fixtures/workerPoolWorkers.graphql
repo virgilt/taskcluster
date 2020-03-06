@@ -1,0 +1,11 @@
+query ListWorkerPoolWorkers($workerPoolId: ID!){
+  workerPool(workerPoolId: $workerPoolId){
+    workers{
+      edges{
+        node{
+          workerId
+        }
+      }
+    }
+  }
+}

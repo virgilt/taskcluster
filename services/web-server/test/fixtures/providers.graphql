@@ -1,0 +1,10 @@
+query ListProviders($connection: PageConnection, $filter: JSON){
+  providers(connection: $connection, filter: $filter){
+    edges{
+      node{
+        providerId
+        providerType
+      }
+    }
+  }
+}

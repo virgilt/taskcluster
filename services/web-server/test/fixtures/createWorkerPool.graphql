@@ -1,0 +1,5 @@
+mutation CreateWorkerPool($workerPoolId: ID!, $payload: WorkerPoolInput!){
+  createWorkerPool(workerPoolId: $workerPoolId, payload: $payload){
+    workerPoolId
+  }
+}

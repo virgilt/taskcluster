@@ -1,0 +1,12 @@
+query Worker($workerPoolId: ID!, $workerGroup: ID!, $workerId: ID!){
+  worker(workerPoolId: $workerPoolId, workerGroup: $workerGroup, workerId: $workerId){
+    workerId
+    queueDataExpires
+    quarantineUntil
+    firstClaim
+    recentTasks{
+      runId
+      taskId
+    }
+  }
+}

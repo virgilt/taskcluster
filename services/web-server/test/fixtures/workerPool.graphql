@@ -1,0 +1,9 @@
+query WorkerPool($workerPoolId: ID!){
+  workerPool(workerPoolId: $workerPoolId){
+    workerPoolId
+    owner
+    lastDateActive
+    pendingTasks
+    queueDataExpires
+  }
+}
