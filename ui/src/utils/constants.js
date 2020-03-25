@@ -22,6 +22,7 @@ import { join } from 'path';
 export const ARTIFACTS_PAGE_SIZE = 1000;
 export const TASK_GROUP_PAGE_SIZE = 1000;
 export const VIEW_WORKER_TYPES_PAGE_SIZE = 1000;
+export const VIEW_WORKER_POOLS_PAGE_SIZE = 1000;
 export const VIEW_WORKERS_PAGE_SIZE = 1000;
 export const VIEW_WORKER_POOL_ERRORS_PAGE_SIZE = 100;
 export const VIEW_CLIENTS_PAGE_SIZE = 1000;

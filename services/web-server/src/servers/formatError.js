@@ -1,6 +1,7 @@
 const { formatError } = require('graphql');
 
 module.exports = error => {
+  console.log(error);
   const data = formatError(error);
 
   if (

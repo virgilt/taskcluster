@@ -46,16 +46,30 @@ module.exports = {
     },
     async lastDateActive({ workerPoolId }, args, { loaders}) {
       const { provisionerId, workerType } = splitWorkerPoolId(workerPoolId);
-      const wt = await loaders.QueueWorkerType.load({
-        provisionerId,
-        workerType,
-      });
-      return wt.lastDateActive;
+      try {
+        const wt = await loaders.QueueWorkerType.load({
+          provisionerId,
+          workerType,
+        });
+        return wt.lastDateActive;
+      } catch (err) {
+        if (err.statusCode !== 404) {
+          throw err;
+        }
+        return undefined;
+      }
     },
     async queueDataExpires({ workerPoolId }, args, { loaders }) {
       const { provisionerId, workerType } = splitWorkerPoolId(workerPoolId);
-      const { expires } = await loaders.QueueWorkerType.load({provisionerId, workerType});
-      return expires;
+      try {
+        const { expires } = await loaders.QueueWorkerType.load({provisionerId, workerType});
+        return expires;
+      } catch (err) {
+        if (err.statusCode !== 404) {
+          throw err;
+        }
+        return undefined;
+      }
     },
     workers(
       { workerPoolId },

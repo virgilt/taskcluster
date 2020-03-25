@@ -181,7 +181,7 @@ export const workers = shape({
   edges: arrayOf(worker),
 });
 
-export const WMError = shape({
+export const WorkerPoolError = shape({
   errorId: string,
   title: string,
   description: string,
@@ -189,7 +189,7 @@ export const WMError = shape({
   extra: object,
 });
 
-export const WMWorker = shape({
+export const Worker = shape({
   workerId: string,
   workerGroup: string,
   workerAge: date,
@@ -222,7 +222,7 @@ export const workerType = shape({
   actions: arrayOf(provisionerAction),
 });
 
-export const WorkerManagerWorkerPoolSummary = shape({
+export const WorkerPool = shape({
   workerPoolId: string,
   providerId: string,
   description: string,
@@ -232,6 +232,15 @@ export const WorkerManagerWorkerPoolSummary = shape({
   owner: string,
   emailOnError: bool,
   pendingTasks: number,
+  errors: arrayOf(WorkerPoolError),
+  workers: arrayOf(Worker),
+  lastDateActive: date,
+  queueDataexpires: date,
+});
+
+export const WorkerPools = shape({
+  pageInfo,
+  edges: arrayOf(WorkerPool),
 });
 
 export const providersArray = arrayOf(

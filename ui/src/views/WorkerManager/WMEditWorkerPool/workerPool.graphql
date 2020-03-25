@@ -1,10 +1,12 @@
-query WorkerPool($workerPoolId: String!) {
-    WorkerPool(workerPoolId: $workerPoolId) {
-        workerPoolId,
-        description,
-        owner,
-        emailOnError,
-        providerId,
+query WorkerPool($workerPoolId: ID!) {
+    workerPool(workerPoolId: $workerPoolId) {
+        workerPoolId
+        description
+        owner
+        emailOnError
+        providerId
         config
+        lastModified
+        pendingTasks
     }
 }

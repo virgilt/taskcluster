@@ -75,9 +75,9 @@ type WorkerPool {
     ): WorkerConnection
 
     # Note: These fields will trigger an additional request.
-    lastDateActive: DateTime!
+    lastDateActive: DateTime
     pendingTasks: Int
-    queueDataExpires: DateTime! # when the data about this worker pool in queue will go away
+    queueDataExpires: DateTime # when the data about this worker pool in queue will go away
 }
 
 type WorkerPoolEdge implements Edge {

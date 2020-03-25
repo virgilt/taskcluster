@@ -1,25 +1,31 @@
 import { hot } from 'react-hot-loader';
 import React, { Component, Fragment } from 'react';
 import { withApollo, graphql } from 'react-apollo';
-import { parse, stringify } from 'qs';
 import PlusIcon from 'mdi-react/PlusIcon';
+import escapeStringRegexp from 'escape-string-regexp';
+import dotProp from 'dot-prop-immutable';
+import Typography from '@material-ui/core/Typography';
 import { withStyles } from '@material-ui/core/styles';
-import Switch from '@material-ui/core/Switch';
-import FormControlLabel from '@material-ui/core/FormControlLabel';
 import Spinner from '@mozilla-frontend-infra/components/Spinner';
 import Dashboard from '../../../components/Dashboard';
 import workerPoolsQuery from './WMWorkerPools.graphql';
 import ErrorPanel from '../../../components/ErrorPanel';
 import WorkerManagerWorkerPoolsTable from '../../../components/WMWorkerPoolsTable';
 import Search from '../../../components/Search';
+import Breadcrumbs from '../../../components/Breadcrumbs';
 import Button from '../../../components/Button';
-import updateWorkerPoolQuery from '../WMEditWorkerPool/updateWorkerPool.graphql';
+import { VIEW_WORKER_POOLS_PAGE_SIZE } from '../../../utils/constants';
 
 @hot(module)
 @withApollo
 @graphql(workerPoolsQuery, {
   options: () => ({
     fetchPolicy: 'network-only', // so that it refreshes view after editing/creating
+    variables: {
+      secretsConnection: {
+        limit: VIEW_WORKER_POOLS_PAGE_SIZE,
+      },
+    },
   }),
 })
 @withStyles(theme => ({
@@ -45,41 +51,47 @@ export default class WorkerManagerWorkerPoolsView extends Component {
     this.props.history.push(`${this.props.match.path}/create`);
   };
 
-  deleteRequest = async ({ workerPoolId, payload }) => {
-    await this.props.client.mutate({
-      mutation: updateWorkerPoolQuery,
+  handlePageChange = ({ cursor, previousCursor }) => {
+    const {
+      data: { fetchMore },
+    } = this.props;
+
+    return fetchMore({
+      query: workerPoolsQuery,
       variables: {
-        workerPoolId,
-        payload: {
-          ...payload,
-          providerId: 'null-provider', // this is how we delete worker pools
+        secretsConnection: {
+          limit: VIEW_WORKER_POOLS_PAGE_SIZE,
+          cursor,
+          previousCursor,
         },
+        filter: this.state.workerPoolSearch
+          ? {
+              name: {
+                $regex: escapeStringRegexp(this.state.workerPoolSearch),
+                $options: 'i',
+              },
+            }
+          : null,
       },
-      refetchQueries: ['workerPools'],
-      awaitRefetchQueries: false,
+      updateQuery(previousResult, { fetchMoreResult }) {
+        const { edges, pageInfo } = fetchMoreResult.secrets;
+
+        return dotProp.set(previousResult, 'secrets', workerPools =>
+          dotProp.set(
+            dotProp.set(workerPools, 'edges', edges),
+            'pageInfo',
+            pageInfo
+          )
+        );
+      },
     });
-  };
-
-  handleSwitchChange = ({ target: { checked } }) => {
-    const query = {
-      ...parse(this.props.history.location.search.slice(1)),
-      include_deleted: checked,
-    };
-
-    this.props.history.replace(
-      `${this.props.match.path}${stringify(query, { addQueryPrefix: true })}`
-    );
   };
 
   render() {
     const {
-      data: { loading, error, WorkerManagerWorkerPoolSummaries },
+      data: { loading, error, workerPools },
       classes,
     } = this.props;
-    const { workerPoolSearch } = this.state;
-    const includeDeleted =
-      parse(this.props.history.location.search.slice(1)).include_deleted ===
-      'true';
 
     return (
       <Dashboard
@@ -88,30 +100,22 @@ export default class WorkerManagerWorkerPoolsView extends Component {
           <Search
             disabled={loading}
             onSubmit={this.handleWorkerPoolSearchSubmit}
-            placeholder="Worker pool ID contains"
+            placeholder="workerPoolId contains"
           />
         }>
         <Fragment>
-          {!WorkerManagerWorkerPoolSummaries && loading && <Spinner loading />}
+          <Breadcrumbs>
+            <Typography variant="body2" className={classes.link}>
+              root
+            </Typography>
+          </Breadcrumbs>
+          {!workerPools && loading && <Spinner loading />}
           <ErrorPanel fixed error={error} />
-          {WorkerManagerWorkerPoolSummaries && (
+          {workerPools && (
             <Fragment>
-              <div className={classes.toolbar}>
-                <FormControlLabel
-                  control={
-                    <Switch
-                      checked={includeDeleted}
-                      onChange={this.handleSwitchChange}
-                    />
-                  }
-                  label="Include worker pools scheduled for deletion"
-                />
-              </div>
               <WorkerManagerWorkerPoolsTable
-                searchTerm={workerPoolSearch}
-                workerPools={WorkerManagerWorkerPoolSummaries}
-                deleteRequest={this.deleteRequest}
-                includeDeleted={includeDeleted}
+                onPageChange={this.handlePageChange}
+                workerPoolsConnection={workerPools}
               />
             </Fragment>
           )}

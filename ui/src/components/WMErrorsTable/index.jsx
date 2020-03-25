@@ -21,7 +21,7 @@ import { VIEW_WORKER_POOL_ERRORS_PAGE_SIZE } from '../../utils/constants';
 import TableCellItem from '../TableCellItem';
 import DateDistance from '../DateDistance';
 import sort from '../../utils/sort';
-import { pageInfo, WMError } from '../../utils/prop-types';
+import { pageInfo, WorkerPoolError } from '../../utils/prop-types';
 
 @withStyles(theme => ({
   errorDescription: {
@@ -68,7 +68,11 @@ export default class WorkerManagerErrorsTable extends Component {
     onPageChange: func.isRequired,
     searchTerm: string,
     errorsConnection: shape({
-      edges: arrayOf(shape({ node: WMError.isRequred }).isRequired).isRequired,
+      edges: arrayOf(
+        shape({
+          node: WorkerPoolError.isRequred,
+        }).isRequired
+      ).isRequired,
       pageInfo: pageInfo.isRequired,
     }).isRequired,
   };

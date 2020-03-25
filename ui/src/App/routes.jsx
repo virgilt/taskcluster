@@ -107,8 +107,8 @@ export default [
   },
   {
     component: WorkerManager,
-    path: '/worker-manager',
-    routes: workerManagerRoutes('/worker-manager'),
+    path: '/workerpools',
+    routes: workerManagerRoutes('/workerpools'),
   },
   {
     component: Secrets,

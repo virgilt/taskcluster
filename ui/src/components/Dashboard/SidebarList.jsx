@@ -1,11 +1,10 @@
 import React, { Component } from 'react';
 import List from '@material-ui/core/List';
 import FeatureSearchIcon from 'mdi-react/FeatureSearchIcon';
-import HexagonSlice4 from 'mdi-react/HexagonSlice4Icon';
+import ServerIcon from 'mdi-react/ServerIcon';
 import PlusCircleIcon from 'mdi-react/PlusCircleIcon';
 import GroupIcon from 'mdi-react/GroupIcon';
 import AccountMultipleIcon from 'mdi-react/AccountMultipleIcon';
-import MixcloudIcon from 'mdi-react/MixcloudIcon';
 import BackupRestoreIcon from 'mdi-react/BackupRestoreIcon';
 import AccountKeyIcon from 'mdi-react/AccountKeyIcon';
 import AccountStarIcon from 'mdi-react/AccountStarIcon';
@@ -64,12 +63,8 @@ export default class SidebarList extends Component {
           </SidebarListItem>
         </SidebarListGroup>
 
-        <SidebarListItem to="/worker-manager" icon={<HexagonSlice4 />}>
-          Worker Manager
-        </SidebarListItem>
-
-        <SidebarListItem to="/provisioners" icon={<MixcloudIcon />}>
-          Workers
+        <SidebarListItem to="/workerpools" icon={<ServerIcon />}>
+          Worker Pools
         </SidebarListItem>
 
         <SidebarListItem to="/purge-caches" icon={<BackupRestoreIcon />}>

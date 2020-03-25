@@ -19,10 +19,7 @@ import MarkdownTextArea from '../MarkdownTextArea';
 import DialogAction from '../DialogAction';
 import Button from '../Button';
 import isWorkerTypeNameValid from '../../utils/isWorkerTypeNameValid';
-import {
-  WorkerManagerWorkerPoolSummary,
-  providersArray,
-} from '../../utils/prop-types';
+import { WorkerPool, providersArray } from '../../utils/prop-types';
 import ErrorPanel from '../ErrorPanel';
 import {
   joinWorkerPoolId,
@@ -85,7 +82,7 @@ export default class WMWorkerPoolEditor extends Component {
   };
 
   static propTypes = {
-    workerPool: WorkerManagerWorkerPoolSummary.isRequired,
+    workerPool: WorkerPool.isRequired,
     providers: providersArray.isRequired,
     saveRequest: func.isRequired,
     isNewWorkerPool: bool,
