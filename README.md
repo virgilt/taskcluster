@@ -1,3 +1,4 @@
+bump
 <h1 align="center">
   <br>
   <img src="https://media.taskcluster.net/logo/logo.png" alt="Taskcluster" width="80">
