@@ -75,7 +75,7 @@ func startLogServe(stream *stream.Stream, getAddr string) {
 		err = runServer(&server, getAddr, "", "")
 	}
 	if err != nil && err != http.ErrServerClosed {
-		log.Fatalf("%s", err)
+		log.Printf("%s", err)
 	}
 }
 
