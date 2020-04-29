@@ -193,12 +193,6 @@ Commands:
           git reset --hard "${GITHUB_SHA}"
           git clean -fdx
           git checkout -B tmp -t "X${TASK_ID}"
-
-          ######################################################################################
-          # Temporary patch to give stack trace in case of "io: read/write on closed pipe" error
-          patch -d "${GOROOT}" -p1 < go1.13.7_src.patch
-          ######################################################################################
-
           cd workers/generic-worker
           # go.mod and go.sum will be affected by above go get commands, so
           # tidy them before checking for changes. Not needed in go 1.14:
