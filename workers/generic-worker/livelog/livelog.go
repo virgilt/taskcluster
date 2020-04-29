@@ -48,6 +48,7 @@ func New(liveLogExecutable string, putPort, getPort uint16) (*LiveLog, error) {
 		command: exec.Command(liveLogExecutable),
 		PUTPort: putPort,
 		GETPort: getPort,
+		done:    make(chan (struct{})),
 	}
 	l.setRequestURLs()
 
