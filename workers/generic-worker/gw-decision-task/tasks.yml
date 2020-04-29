@@ -193,6 +193,7 @@ Commands:
           git reset --hard "${GITHUB_SHA}"
           git clean -fdx
           git checkout -B tmp -t "X${TASK_ID}"
+          go get -v -u github.com/taskcluster/livelog
 
           ######################################################################################
           # Temporary patch to give stack trace in case of "io: read/write on closed pipe" error
@@ -211,7 +212,6 @@ Commands:
           test $(git status --porcelain | wc -l) == 0
           go install -tags "${ENGINE}" -v -ldflags "-X main.revision=${GITHUB_SHA}" ./...
           go install ../../tools/taskcluster-proxy
-          go install ../../tools/livelog
           go vet -tags "${ENGINE}" ./...
           if [ "${ENGINE}" == "multiuser" ]; then
             cp "${TASK_USER_CREDENTIALS}" next-task-user.json
@@ -257,6 +257,7 @@ Commands:
       - 'git reset --hard %GITHUB_SHA%'
       - 'git clean -fdx'
       - 'git checkout -B tmp -t "X%TASK_ID%"'
+      - go get -v -u github.com/taskcluster/livelog
       - cd workers\generic-worker
       - |
         :: go.mod and go.sum will be affected by above go get commands, so
@@ -277,7 +278,6 @@ Commands:
         exit /b 0
       - go install -tags "%ENGINE%" -v -ldflags "-X main.revision=%GITHUB_SHA%" ./...
       - go install ..\..\tools\taskcluster-proxy
-      - go install ..\..\tools\livelog
       - go vet -tags "%ENGINE%" ./...
       - set CGO_ENABLED=%CGO_ENABLED_TESTS%
       - set GORACE=history_size=7
