@@ -1,0 +1,79 @@
+diff --git a/src/io/pipe.go b/src/io/pipe.go
+index 4efaf2f8e4..9fd401ed1c 100644
+--- a/src/io/pipe.go
++++ b/src/io/pipe.go
+@@ -8,7 +8,7 @@
+ package io
+ 
+ import (
+-	"errors"
++	"runtime"
+ 	"sync"
+ 	"sync/atomic"
+ )
+@@ -25,8 +25,42 @@ func (a *atomicError) Load() error {
+ 	return err.error
+ }
+ 
++// Stack returns a formatted stack trace of the goroutine that calls it.
++// It calls runtime.Stack with a large enough buffer to capture the entire trace.
++func Stack() []byte {
++	buf := make([]byte, 1024)
++	for {
++		n := runtime.Stack(buf, false)
++		if n < len(buf) {
++			return buf[:n]
++		}
++		buf = make([]byte, 2*len(buf))
++	}
++}
++
++func SetClosedPipeStack() {
++	stack := Stack()
++	e := ErrClosedPipe.(*StackError)
++	e.Stack = stack
++}
++
++type StackError struct {
++	Message string
++	Stack   []byte
++}
++
++func (se *StackError) Error() string {
++	return se.Message + "\n" + string(se.Stack)
++}
++
++func NewError(message string) error {
++	return &StackError{
++		Message: message,
++	}
++}
++
+ // ErrClosedPipe is the error used for read or write operations on a closed pipe.
+-var ErrClosedPipe = errors.New("io: read/write on closed pipe")
++var ErrClosedPipe = NewError("io: read/write on closed pipe")
+ 
+ // A pipe is the shared pipe structure underlying PipeReader and PipeWriter.
+ type pipe struct {
+@@ -62,11 +96,13 @@ func (p *pipe) readCloseError() error {
+ 	if werr := p.werr.Load(); rerr == nil && werr != nil {
+ 		return werr
+ 	}
++	SetClosedPipeStack()
+ 	return ErrClosedPipe
+ }
+ 
+ func (p *pipe) CloseRead(err error) error {
+ 	if err == nil {
++		SetClosedPipeStack()
+ 		err = ErrClosedPipe
+ 	}
+ 	p.rerr.Store(err)
+@@ -101,6 +137,7 @@ func (p *pipe) writeCloseError() error {
+ 	if rerr := p.rerr.Load(); werr == nil && rerr != nil {
+ 		return rerr
+ 	}
++	SetClosedPipeStack()
+ 	return ErrClosedPipe
+ }
+ 
