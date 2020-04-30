@@ -23,10 +23,9 @@ import (
 var hostDomain = "stateless-dns.example.com"
 var secret = "sshhh!"
 
-func makeStatelessDNSExposer(t *testing.T) Exposer {
+func makeStatlessDNSExposer(t *testing.T) Exposer {
 	exposer, err := NewStatelessDNS(
 		net.ParseIP("127.0.0.1"),
-		0,
 		hostDomain,
 		secret,
 		time.Minute,
@@ -50,7 +49,7 @@ func TestStatelessDNSExposeHTTP(t *testing.T) {
 	_, testPortStr, _ := net.SplitHostPort(testURL.Host)
 	testPort, _ := strconv.Atoi(testPortStr)
 
-	exposer := makeStatelessDNSExposer(t)
+	exposer := makeStatlessDNSExposer(t)
 	exposure, err := exposer.ExposeHTTP(uint16(testPort))
 	if err != nil {
 		t.Fatalf("ExposeHTTP returned an error: %v", err)
@@ -118,7 +117,7 @@ func TestStatelessDNSExposePort(t *testing.T) {
 		_ = stream.Close()
 	}()
 
-	exposer := makeStatelessDNSExposer(t)
+	exposer := makeStatlessDNSExposer(t)
 	exposure, err := exposer.ExposeTCPPort(uint16(tcpListenerPort))
 	if err != nil {
 		t.Fatalf("ExposeTCPPort returned an error: %v", err)

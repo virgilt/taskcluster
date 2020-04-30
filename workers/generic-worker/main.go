@@ -351,7 +351,6 @@ func setupExposer() (err error) {
 
 		exposer, err = expose.NewStatelessDNS(
 			config.PublicIP,
-			config.LiveLogGETPort,
 			config.Subdomain,
 			config.LiveLogSecret,
 			// Allow each exposure to last for 24 hours. After the task completes, the exposure URL

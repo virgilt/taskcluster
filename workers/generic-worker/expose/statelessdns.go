@@ -13,7 +13,6 @@ import (
 
 type statelessDNSExposer struct {
 	publicIP           net.IP
-	publicPort         uint16
 	hostDomain         string
 	statelessDNSSecret string
 	duration           time.Duration
@@ -29,12 +28,8 @@ type statelessDNSExposer struct {
 // is signed with the statelessDNSSecret in such a way that the DNS server can
 // validate it.  The tlsCert and tlsKey are used to serve HTTPS, and should
 // be valid for `*.<hostDomain>`.
-//
-// If incoming connections must be on a specific port (because it is open in
-// a firewall somewhere), pass that as publicPort.  If all ports are available.
-// publicPort can be 0.
-func NewStatelessDNS(publicIP net.IP, publicPort uint16, hostDomain, statelessDNSSecret string, duration time.Duration, tlsCert, tlsKey string) (Exposer, error) {
-	return &statelessDNSExposer{publicIP, publicPort, hostDomain, statelessDNSSecret, duration, tlsCert, tlsKey}, nil
+func NewStatelessDNS(publicIP net.IP, hostDomain, statelessDNSSecret string, duration time.Duration, tlsCert, tlsKey string) (Exposer, error) {
+	return &statelessDNSExposer{publicIP, hostDomain, statelessDNSSecret, duration, tlsCert, tlsKey}, nil
 }
 
 func (exposer *statelessDNSExposer) ExposeHTTP(targetPort uint16) (Exposure, error) {
@@ -66,9 +61,8 @@ func (exposer *statelessDNSExposer) makeListener() (net.Listener, error) {
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 	}
-	// for stateless DNS, we must use a specific port since that is what is allowed by
-	// the network filters
-	return tls.Listen("tcp", fmt.Sprintf(":%d", exposer.publicPort), tlsConfig)
+	// :0 means to choose an arbitrary port
+	return tls.Listen("tcp", ":0", tlsConfig)
 }
 
 // getURL is a utility function for exposures to generate a URL
