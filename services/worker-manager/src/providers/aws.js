@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const _ = require('lodash');
 const {CloudAPI} = require('./cloudapi');
+const {WorkerPool, Worker} = require('../data');
 
 class AwsProvider extends Provider {
   constructor({
@@ -13,11 +14,11 @@ class AwsProvider extends Provider {
     monitor,
     rootUrl,
     Worker,
-    WorkerPool,
     WorkerPoolError,
     estimator,
     validator,
     notify,
+    db,
     providerConfig,
   }) {
     super({
@@ -25,11 +26,11 @@ class AwsProvider extends Provider {
       monitor,
       rootUrl,
       Worker,
-      WorkerPool,
       WorkerPoolError,
       estimator,
       validator,
       notify,
+      db,
       providerConfig,
     });
     this.configSchema = 'config-aws';
@@ -86,9 +87,8 @@ class AwsProvider extends Provider {
     const {workerPoolId} = workerPool;
 
     if (!workerPool.providerData[this.providerId]) {
-      await workerPool.modify(wt => {
-        wt.providerData[this.providerId] = wt.providerData[this.providerId] || {};
-      });
+      await this.db.fns.update_worker_pool_provider_data(
+        workerPool.workerPoolId, this.providerId, {});
     }
 
     const toSpawn = await this.estimator.simple({
@@ -130,19 +130,18 @@ class AwsProvider extends Provider {
         rootUrl: this.rootUrl,
         workerPoolId,
         providerId: this.providerId,
-        workerGroup: this.providerId,
+        workerGroup: config.region,
         // NOTE: workerConfig is deprecated and isn't used after worker-runner v29.0.1
         workerConfig: config.workerConfig || {},
       }));
       // https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-metadata.html#instancedata-add-user-data
       // The raw data should be 16KB maximum
       if (userData.length > 16384) {
-        return await workerPool.reportError({
+        return await this.reportError({
+          workerPool,
           kind: 'creation-error',
           title: 'User Data is too long',
           description: 'Try removing some workerConfiguration and consider putting it in a secret',
-          notify: this.notify,
-          WorkerPoolError: this.WorkerPoolError,
         });
       }
 
@@ -209,12 +208,11 @@ class AwsProvider extends Provider {
           ],
         }).promise());
       } catch (e) {
-        return await workerPool.reportError({
+        return await this.reportError({
+          workerPool,
           kind: 'creation-error',
           title: 'Instance Creation Error',
           description: `Error calling AWS API: ${e.message}`,
-          notify: this.notify,
-          WorkerPoolError: this.WorkerPoolError,
         });
       }
 
@@ -226,20 +224,16 @@ class AwsProvider extends Provider {
         this.monitor.log.workerRequested({
           workerPoolId,
           providerId: this.providerId,
-          workerGroup: this.providerId,
+          workerGroup: config.region,
           workerId: i.InstanceId,
         });
-        const now = new Date();
-        return this.Worker.create({
+        const worker = Worker.fromApi({
           workerPoolId,
           providerId: this.providerId,
-          workerGroup: this.providerId,
+          workerGroup: config.region,
           workerId: i.InstanceId,
-          created: now,
-          lastModified: now,
-          lastChecked: now,
           expires: taskcluster.fromNow('1 week'),
-          state: this.Worker.states.REQUESTED,
+          state: Worker.states.REQUESTED,
           capacity: config.capacityPerInstance,
           providerData: {
             region: config.region,
@@ -258,6 +252,7 @@ class AwsProvider extends Provider {
             workerConfig: config.workerConfig || {},
           },
         });
+        return worker.create(this.db);
       }));
     }
   }
@@ -265,14 +260,11 @@ class AwsProvider extends Provider {
   /**
    * This method checks instance identity document authenticity
    * If it's authentic it checks whether the data in it corresponds to the worker
-   *
-   * @param worker string
-   * @param workerPool string
-   * @param workerIdentityProof {document: string, signature: string}
-   * @returns {Promise<{expires: *}>}
    */
   async registerWorker({worker, workerPool, workerIdentityProof}) {
-    if (worker.state !== this.Worker.states.REQUESTED) {
+    const monitor = this.workerMonitor({worker});
+
+    if (worker.state !== Worker.states.REQUESTED) {
       throw new ApiError('This worker is either stopped or running. No need to register');
     }
 
@@ -300,18 +292,23 @@ class AwsProvider extends Provider {
       providerId: this.providerId,
       workerId: worker.workerId,
     });
-    await worker.modify(w => {
-      w.lastModified = new Date();
-      w.state = this.Worker.states.RUNNING;
-      w.providerData.terminateAfter = expires.getTime();
+    monitor.debug('setting state to RUNNING');
+    await worker.update(this.db, worker => {
+      worker.lastModified = new Date();
+      worker.providerData.terminateAfter = expires.getTime();
+      worker.state = Worker.states.RUNNING;
     });
 
     const workerConfig = worker.providerData.workerConfig || {};
-    return {expires, workerConfig};
+    return {
+      expires,
+      workerConfig,
+    };
   }
 
   async checkWorker({worker}) {
     this.seen[worker.workerPoolId] = this.seen[worker.workerPoolId] || 0;
+    const monitor = this.workerMonitor({worker});
 
     let state = worker.state;
     try {
@@ -320,6 +317,7 @@ class AwsProvider extends Provider {
         InstanceIds: [worker.workerId.toString()],
         IncludeAllInstances: true,
       }).promise())).InstanceStatuses;
+      monitor.debug(`instance statuses: ${instanceStatuses.map(is => is.InstanceState.Name).join(', ')}`);
       for (const is of instanceStatuses) {
         switch (is.InstanceState.Name) {
           case 'pending':
@@ -336,7 +334,7 @@ class AwsProvider extends Provider {
               providerId: this.providerId,
               workerId: worker.workerId,
             });
-            state = this.Worker.states.STOPPED;
+            state = Worker.states.STOPPED;
             break;
 
           default:
@@ -344,31 +342,38 @@ class AwsProvider extends Provider {
         }
       }
       if (worker.providerData.terminateAfter && worker.providerData.terminateAfter < Date.now()) {
-        await this.removeWorker({worker});
+        await this.removeWorker({worker, reason: 'terminateAfter time exceeded'});
       }
     } catch (e) {
       if (e.code !== 'InvalidInstanceID.NotFound') { // aws throws this error for instances that had been terminated, too
         throw e;
       }
+      monitor.debug('instance status not found');
       this.monitor.log.workerStopped({
         workerPoolId: worker.workerPoolId,
         providerId: this.providerId,
         workerId: worker.workerId,
       });
-      state = this.Worker.states.STOPPED;
+      state = Worker.states.STOPPED;
     }
 
-    await worker.modify(w => {
-      const now = new Date();
-      if (w.state !== state) {
-        w.lastModified = now;
-      }
-      w.lastChecked = now;
-      w.state = state;
+    monitor.debug(`setting state to ${state}`);
+    const now = new Date();
+    await worker.update(this.db, worker => {
+      worker.state = state;
+      worker.lastModified = worker.state !== state ? now : null;
+      worker.lastChecked = now;
     });
   }
 
-  async removeWorker({worker}) {
+  async removeWorker({worker, reason}) {
+    this.monitor.log.workerRemoved({
+      workerPoolId: worker.workerPoolId,
+      providerId: worker.providerId,
+      workerId: worker.workerId,
+      reason,
+    });
+
     let result;
     try {
       const region = worker.providerData.region;
@@ -376,16 +381,15 @@ class AwsProvider extends Provider {
         InstanceIds: [worker.workerId],
       }).promise());
     } catch (e) {
-      const workerPool = await this.WorkerPool.load({
-        workerPoolId: worker.workerPoolId,
-      });
-      await workerPool.reportError({
-        kind: 'termination-error',
-        title: 'Instance Termination Error',
-        description: `Error terminating AWS instance: ${e.message}`,
-        notify: this.notify,
-        WorkerPoolError: this.WorkerPoolError,
-      });
+      const workerPool = await WorkerPool.get(this.db, worker.workerPoolId);
+      if (workerPool) {
+        await this.reportError({
+          workerPool,
+          kind: 'termination-error',
+          title: 'Instance Termination Error',
+          description: `Error terminating AWS instance: ${e.message}`,
+        });
+      }
 
       return;
     }

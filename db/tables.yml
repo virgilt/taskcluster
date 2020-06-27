@@ -8,11 +8,6 @@
 # The information below is only useful to developers implementing or modifying
 # stored functions.
 
-# Widgets is a temporary API developed to "trial run" the Postgres deployment, and
-# will be removed soon.
-widgets:
-  name: text
-
 # All of the *_entities tables below are used by tc-lib-entities to emulate
 # Azure entities.
 clients_entities:
@@ -87,12 +82,13 @@ denylisted_notification_entities:
   value: jsonb not null
   version: integer not null
   etag: uuid
-cache_purges_entities:
-  partition_key: text not null
-  row_key: text not null
-  value: jsonb not null
-  version: integer not null
-  etag: uuid
+cache_purges:
+  provisioner_id: text not null
+  worker_type: text not null
+  cache_name: text not null
+  before: timestamp with time zone not null
+  expires: timestamp with time zone not null
+  etag: uuid not null
 secrets_entities:
   partition_key: text not null
   row_key: text not null
@@ -135,18 +131,32 @@ wmworker_pool_errors_entities:
   value: jsonb not null
   version: integer not null
   etag: uuid
-wmworker_pools_entities:
-  partition_key: text not null
-  row_key: text not null
-  value: jsonb not null
-  version: integer not null
-  etag: uuid
-wmworkers_entities:
-  partition_key: text not null
-  row_key: text not null
-  value: jsonb not null
-  version: integer not null
-  etag: uuid
+worker_pools:
+  worker_pool_id: text not null
+  provider_id: text not null
+  created: timestamp with time zone not null
+  description: text not null
+  email_on_error: boolean not null
+  owner: text not null
+  last_modified: timestamp with time zone not null
+  config: jsonb not null
+  provider_data: jsonb not null
+  previous_provider_ids: jsonb not null
+  etag: uuid not null
+workers:
+  worker_pool_id: text not null
+  worker_group: text not null
+  worker_id: text not null
+  provider_id: text not null
+  created: timestamp with time zone not null
+  expires: timestamp with time zone not null
+  state: text not null
+  provider_data: jsonb not null
+  capacity: integer not null
+  last_modified: timestamp with time zone not null
+  last_checked: timestamp with time zone not null
+  secret: jsonb
+  etag: uuid not null
 queue_tasks_entities:
   partition_key: text not null
   row_key: text not null

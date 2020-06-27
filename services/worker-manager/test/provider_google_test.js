@@ -1,10 +1,10 @@
 const taskcluster = require('taskcluster-client');
-const sinon = require('sinon');
-const assert = require('assert');
+const assert = require('assert').strict;
 const helper = require('./helper');
-const {FakeGoogle} = require('./fake-google');
+const {FakeGoogle} = require('./fakes');
 const {GoogleProvider} = require('../src/providers/google');
 const testing = require('taskcluster-lib-testing');
+const {WorkerPool, Worker} = require('../src/data');
 
 helper.secrets.mockSuite(testing.suiteName(), ['db'], function(mock, skipping) {
   helper.withDb(mock, skipping);
@@ -15,34 +15,58 @@ helper.secrets.mockSuite(testing.suiteName(), ['db'], function(mock, skipping) {
   helper.resetTables(mock, skipping);
 
   let provider;
-  let workerPool;
   let providerId = 'google';
   let workerPoolId = 'foo/bar';
-  let fakeGoogle;
+  const project = 'testy';
+
+  const fake = new FakeGoogle;
+  fake.forSuite();
 
   setup(async function() {
-    fakeGoogle = new FakeGoogle();
     provider = new GoogleProvider({
       providerId,
       notify: await helper.load('notify'),
+      db: helper.db,
       monitor: (await helper.load('monitor')).childMonitor('google'),
       estimator: await helper.load('estimator'),
-      fakeCloudApis: {
-        google: fakeGoogle,
-      },
       rootUrl: helper.rootUrl,
-      Worker: helper.Worker,
-      WorkerPool: helper.WorkerPool,
       WorkerPoolError: helper.WorkerPoolError,
       providerConfig: {
-        project: 'testy',
+        project,
         instancePermissions: [],
-        creds: '{}',
+        creds: '{"client_id": "fake-creds"}',
         workerServiceAccountId: '12345',
         _backoffDelay: 1,
       },
     });
-    workerPool = await helper.WorkerPool.create({
+
+    await helper.db.fns.delete_worker_pool(workerPoolId);
+
+    await provider.setup();
+  });
+
+  const defaultLaunchConfig = {
+    capacityPerInstance: 1,
+    machineType: 'n1-standard-2',
+    region: 'us-east1',
+    zone: 'us-east1-a',
+    workerConfig: {},
+    scheduling: {},
+    networkInterfaces: [],
+    disks: [],
+  };
+
+  const makeWorker = async (overrides = {}) => {
+    let worker = Worker.fromApi({
+      ...overrides,
+    });
+    await worker.create(helper.db);
+
+    return worker;
+  };
+
+  const makeWorkerPool = async (overrides = {}) => {
+    let workerPool = WorkerPool.fromApi({
       workerPoolId,
       providerId,
       description: 'none',
@@ -52,82 +76,284 @@ helper.secrets.mockSuite(testing.suiteName(), ['db'], function(mock, skipping) {
       config: {
         minCapacity: 1,
         maxCapacity: 1,
-        lifecycle: {
-          registrationTimeout: 6000,
-        },
-        launchConfigs: [
-          {
-            capacityPerInstance: 1,
-            machineType: 'n1-standard-2',
-            region: 'us-east1',
-            zone: 'us-east1-a',
-            workerConfig: {},
-            scheduling: {},
-            networkInterfaces: [],
-            disks: [],
-          },
-        ],
+        launchConfigs: [defaultLaunchConfig],
       },
       owner: 'whatever@example.com',
       providerData: {},
       emailOnError: false,
+      ...overrides,
     });
-    await provider.setup();
-  });
+    await workerPool.create(helper.db);
 
-  test('provisioning loop', async function() {
-    const now = Date.now();
-    const workerInfo = {
-      existingCapacity: 0,
-      requestedCapacity: 0,
+    return workerPool;
+  };
+
+  const constructorTest = (name, creds) => {
+    test(name, async function() {
+      // this just has to not fail -- the google.auth.fromJSON call will fail if the creds
+      // are malformed
+      new GoogleProvider({
+        providerId,
+        notify: await helper.load('notify'),
+        db: helper.db,
+        monitor: (await helper.load('monitor')).childMonitor('google'),
+        estimator: await helper.load('estimator'),
+        rootUrl: helper.rootUrl,
+        WorkerPoolError: helper.WorkerPoolError,
+        providerConfig: {
+          project,
+          instancePermissions: [],
+          creds,
+          workerServiceAccountId: '12345',
+          _backoffDelay: 1,
+        },
+      });
+    });
+  };
+  constructorTest('constructor with creds as object', {"client_id": "fake-creds"});
+  constructorTest('constructor with creds as string', '{"client_id": "fake-creds"}');
+  constructorTest('constructor with creds as base64', Buffer.from('{"client_id": "fake-creds"}', 'utf8').toString('base64'));
+
+  suite('provisioning', function() {
+    const provisionTest = (name, {config, expectedWorkers}, check) => {
+      test(name, async function() {
+        const workerPool = await makeWorkerPool({config});
+        const workerInfo = {existingCapacity: 0, requestedCapacity: 0};
+        await provider.provision({workerPool, workerInfo});
+        const workers = await Worker.getWorkers(helper.db, {});
+        assert.equal(workers.rows.length, expectedWorkers);
+        await check(workers);
+      });
     };
-    await provider.provision({workerPool, workerInfo});
-    const workers = await helper.Worker.scan({}, {});
-    // Check that this is setting times correctly to within a second or so to allow for some time
-    // for the provisioning loop
-    assert(workers.entries[0].providerData.terminateAfter - now - (6000 * 1000) < 5000);
-    assert.deepEqual(workers.entries[0].providerData.operation, {
-      name: 'foo',
-      zone: 'whatever/a',
+
+    const config = {
+      minCapacity: 1,
+      maxCapacity: 1,
+      launchConfigs: [defaultLaunchConfig],
+    };
+
+    provisionTest('simple success', {
+      config,
+      expectedWorkers: 1,
+    }, async workers => {
+      const worker = workers.rows[0];
+
+      assert.equal(worker.workerPoolId, workerPoolId, 'Worker was created for a wrong worker pool');
+      assert.equal(worker.workerGroup, defaultLaunchConfig.region, 'Worker group should be region');
+      assert.equal(worker.state, Worker.states.REQUESTED, 'Worker should be marked as requested');
+      assert.equal(worker.providerData.zone, defaultLaunchConfig.zone, 'Zone should come from the chosen config');
+      assert.deepEqual(worker.providerData.workerConfig, {});
+
+      const parameters = fake.compute.instances.insertCalls[0];
+      assert.equal(parameters.project, project);
+      assert.equal(parameters.zone, defaultLaunchConfig.zone);
+      assert.deepEqual(parameters.requestBody.labels, {
+        'created-by': 'taskcluster-wm-' + providerId,
+        'managed-by': 'taskcluster',
+        'worker-pool-id': workerPoolId.replace('/', '-'),
+        'owner': 'whatever-example-com',
+      });
+      assert.equal(parameters.requestBody.description, 'none');
+      assert.deepEqual(parameters.requestBody.disks, []);
+      assert.deepEqual(parameters.requestBody.serviceAccounts, [{
+        email: 'testy-12345@example.com',
+        scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+      }]);
+      assert.deepEqual(parameters.requestBody.scheduling, {automaticRestart: false});
+
+      assert.equal(parameters.requestBody.metadata.items.length, 1);
+      const meta = parameters.requestBody.metadata.items[0];
+      assert.equal(meta.key, 'taskcluster');
+      const tcmeta = JSON.parse(meta.value);
+      assert.deepEqual(tcmeta, {
+        workerPoolId,
+        providerId,
+        workerGroup: defaultLaunchConfig.region,
+        rootUrl: helper.rootUrl,
+        workerConfig: {},
+      });
+
+      const instanceName = parameters.requestBody.name;
+      assert(fake.compute.zoneOperations.fakeOperationExists(
+        worker.providerData.operation));
+      assert.equal(worker.workerId, `instance-${instanceName}`);
+    });
+
+    provisionTest('registrationTimeout', {
+      config: {
+        ...config,
+        lifecycle: {
+          registrationTimeout: 6000,
+        },
+      },
+      expectedWorkers: 1,
+    }, async workers => {
+      const worker = workers.rows[0];
+      // Check that this is setting times correctly to within a second or so to allow for some time
+      // for the provisioning loop
+      assert(worker.providerData.terminateAfter - new Date() - (6000 * 1000) < 5000);
+    });
+
+    provisionTest('labels', {
+      config: {
+        ...config,
+        launchConfigs: [{
+          ...defaultLaunchConfig,
+          labels: {
+            color: 'red',
+            owner: 'ignored',
+          },
+        }],
+      },
+      expectedWorkers: 1,
+    }, async workers => {
+      const parameters = fake.compute.instances.insertCalls[0];
+      assert.deepEqual(parameters.requestBody.labels, {
+        'created-by': 'taskcluster-wm-' + providerId,
+        'managed-by': 'taskcluster',
+        'worker-pool-id': workerPoolId.replace('/', '-'),
+        'owner': 'whatever-example-com',
+        'color': 'red',
+      });
+    });
+
+    provisionTest('disks', {
+      config: {
+        ...config,
+        launchConfigs: [{
+          ...defaultLaunchConfig,
+          disks: [{testProperty: 'bar', labels: {color: 'purple'}}],
+        }],
+      },
+      expectedWorkers: 1,
+    }, async workers => {
+      const parameters = fake.compute.instances.insertCalls[0];
+      assert.deepEqual(parameters.requestBody.disks, [
+        {
+          testProperty: 'bar',
+          labels: {
+            'created-by': 'taskcluster-wm-' + providerId,
+            'managed-by': 'taskcluster',
+            'worker-pool-id': workerPoolId.replace('/', '-'),
+            'owner': 'whatever-example-com',
+            'color': 'purple',
+          },
+        },
+      ]);
+    });
+
+    provisionTest('top-level launchConfig property', {
+      config: {
+        ...config,
+        launchConfigs: [{
+          ...defaultLaunchConfig,
+          testProperty: 'foo',
+        }],
+      },
+      expectedWorkers: 1,
+    }, async workers => {
+      const parameters = fake.compute.instances.insertCalls[0];
+      assert.equal(parameters.requestBody.testProperty, 'foo');
+    });
+
+    provisionTest('scheduling', {
+      config: {
+        ...config,
+        launchConfigs: [{
+          ...defaultLaunchConfig,
+          scheduling: {testProperty: 'foo'},
+        }],
+      },
+      expectedWorkers: 1,
+    }, async workers => {
+      const parameters = fake.compute.instances.insertCalls[0];
+      assert.equal(parameters.requestBody.scheduling.testProperty, 'foo');
+    });
+
+    provisionTest('extra metadata', {
+      config: {
+        ...config,
+        launchConfigs: [{
+          ...defaultLaunchConfig,
+          metadata: {
+            items: [
+              {key: 'mystuff', value: 'foo'},
+            ],
+          },
+        }],
+      },
+      expectedWorkers: 1,
+    }, async workers => {
+      const parameters = fake.compute.instances.insertCalls[0];
+      assert.equal(parameters.requestBody.metadata.items.length, 2);
+      const meta = parameters.requestBody.metadata.items[0];
+      assert.equal(meta.key, 'mystuff');
+      assert.equal(meta.value, 'foo');
+    });
+
+    provisionTest('workerConfig', {
+      config: {
+        ...config,
+        launchConfigs: [{
+          ...defaultLaunchConfig,
+          workerConfig: {
+            slowRollTasks: true,
+          },
+        }],
+      },
+      expectedWorkers: 1,
+    }, async workers => {
+      const parameters = fake.compute.instances.insertCalls[0];
+      assert.equal(parameters.requestBody.metadata.items.length, 1);
+      const meta = parameters.requestBody.metadata.items[0];
+      assert.equal(meta.key, 'taskcluster');
+      const tcmeta = JSON.parse(meta.value);
+      assert.deepEqual(tcmeta.workerConfig, {
+        slowRollTasks: true,
+      });
+    });
+
+    test('failure from compute.insert', async function() {
+      const workerPool = await makeWorkerPool();
+      const workerInfo = {existingCapacity: 0, requestedCapacity: 0};
+
+      // replicate the shape of an error from the google API
+      fake.compute.instances.failFakeInsertWith = fake.makeError('uhoh', 400);
+
+      await provider.provision({workerPool, workerInfo});
+      const errors = await helper.WorkerPoolError.scan({}, {});
+      assert.equal(errors.entries.length, 1);
+      assert.equal(errors.entries[0].description, 'uhoh');
+      const workers = await Worker.getWorkers(helper.db, {});
+      assert.equal(workers.rows.length, 0); // nothing created
+    });
+
+    test('rate-limiting from compute.insert', async function() {
+      const workerPool = await makeWorkerPool();
+      const workerInfo = {existingCapacity: 0, requestedCapacity: 0};
+
+      // replicate the shape of an error from the google API
+      fake.compute.instances.failFakeInsertWith = fake.makeError('back off', 403);
+
+      await provider.provision({workerPool, workerInfo});
+
+      const errors = await helper.WorkerPoolError.scan({}, {});
+      assert.equal(errors.entries.length, 0);
+
+      // called twice, retrying automatically
+      assert.equal(fake.compute.instances.insertCalls.length, 2);
+
+      const workers = await Worker.getWorkers(helper.db, {});
+      assert.equal(workers.rows.length, 1); // created a worker on retry
     });
   });
 
-  test('provisioning loop with failure', async function() {
-    const workerInfo = {
-      existingCapacity: 0,
-      requestedCapacity: 0,
-    };
-    // The fake throws an error on the second call
-    await provider.provision({workerPool, workerInfo});
-    await provider.provision({workerPool, workerInfo});
-    const errors = await helper.WorkerPoolError.scan({}, {});
-    assert.equal(errors.entries.length, 1);
-    assert.equal(errors.entries[0].description, 'something went wrong');
-    const workers = await helper.Worker.scan({}, {});
-    assert.equal(workers.entries.length, 1); // second loop should not have created one
-  });
-
-  test('provisioning loop with rate limiting', async function() {
-    const workerInfo = {
-      existingCapacity: 0,
-      requestedCapacity: 0,
-    };
-    // Notice this is only three loops, but instance insert fails on third try before succeeding on 4th
-    await provider.provision({workerPool, workerInfo});
-    await provider.provision({workerPool, workerInfo});
-    await provider.provision({workerPool, workerInfo});
-
-    const workers = await helper.Worker.scan({}, {});
-    assert.equal(workers.entries.length, 2);
-  });
-
-  test('de-provisioning loop', async function() {
-    // simulate previous provisionig and deleting the workerpool
-    await workerPool.modify(wp => {
-      wp.providerId = 'null-provider';
-      wp.previousProviderIds = ['google'];
-      wp.providerData.google = {};
-      return wp;
+  test('deprovision', async function() {
+    const workerPool = await makeWorkerPool({
+      // simulate previous provisionig and deleting the workerpool
+      providerId: 'null-provider',
+      previousProviderIds: ['google'],
+      providerData: {google: {}},
     });
     await provider.deprovision({workerPool});
     // nothing has changed..
@@ -135,19 +361,19 @@ helper.secrets.mockSuite(testing.suiteName(), ['db'], function(mock, skipping) {
   });
 
   test('removeResources', async function() {
-    await workerPool.modify(wp => {
-      wp.providerData.google = {};
-      return wp;
+    const workerPool = await makeWorkerPool({
+      providerData: {google: {}},
     });
     await provider.removeResources({workerPool});
-    assert(!workerPool.providerData.google);
+    // nothing has changed..
+    assert.deepEqual(workerPool.providerData.google, {});
   });
 
   test('removeWorker', async function() {
     const workerId = '12345';
-    const worker = await helper.Worker.create({
+    const worker = await makeWorker({
       workerPoolId,
-      workerGroup: 'whatever',
+      workerGroup: 'us-east1',
       workerId,
       providerId,
       created: taskcluster.fromNow('0 seconds'),
@@ -159,203 +385,150 @@ helper.secrets.mockSuite(testing.suiteName(), ['db'], function(mock, skipping) {
       providerData: {zone: 'us-east1-a'},
     });
     await provider.removeWorker({worker});
-    assert(fakeGoogle.instanceDeleteStub.called);
+    assert(fake.compute.instances.delete_called);
   });
 
-  test('worker-scan loop', async function() {
-    const workerInfo = {
-      existingCapacity: 0,
-      requestedCapacity: 0,
+  suite('checkWorker', function() {
+    const workerId = 'wkrid';
+    const suiteMakeWorker = async (overrides) => {
+      return await makeWorker({
+        workerPoolId,
+        workerGroup: 'us-east1',
+        workerId,
+        providerId,
+        created: taskcluster.fromNow('-2 weeks'),
+        lastModified: taskcluster.fromNow('-2 weeks'),
+        lastChecked: taskcluster.fromNow('-2 weeks'),
+        capacity: 1,
+        expires: taskcluster.fromNow('2 weeks'),
+        state: Worker.states.RUNNING,
+        ...overrides,
+        providerData: {project, zone: 'us-east1-a', ...overrides.providerData || {}},
+      });
     };
-    await provider.provision({workerPool, workerInfo});
-    const worker = await helper.Worker.load({
-      workerPoolId: 'foo/bar',
-      workerId: '123',
-      workerGroup: 'google',
+
+    const runCheckWorker = async worker => {
+      await provider.scanPrepare();
+      await provider.checkWorker({worker});
+      await provider.scanCleanup();
+      await worker.reload(helper.db);
+      return worker;
+    };
+
+    test('for a still-requested worker', async function() {
+      await makeWorkerPool();
+      let worker = await suiteMakeWorker({state: 'requested'});
+      fake.compute.instances.setFakeInstanceStatus(
+        project, 'us-east1-a', workerId,
+        'RUNNING');
+      worker = await runCheckWorker(worker);
+
+      // RUNNING is set by register which does not happen here
+      assert.equal(worker.state, Worker.states.REQUESTED);
     });
 
-    assert(worker.providerData.operation);
-    assert.equal(worker.state, helper.Worker.states.REQUESTED);
-
-    // On the first run we've faked that the instance is running
-    await provider.scanPrepare();
-    await provider.checkWorker({worker});
-    await provider.scanCleanup();
-    await worker.reload();
-    assert.equal(worker.state, helper.Worker.states.REQUESTED); // RUNNING is set by register which does not happen here
-
-    // And now we fake it is stopped
-    await provider.scanPrepare();
-    await provider.checkWorker({worker});
-    await provider.scanCleanup();
-    await worker.reload();
-    assert.equal(worker.state, helper.Worker.states.STOPPED);
-  });
-
-  test('update long-running worker', async function() {
-    const expires = taskcluster.fromNow('-1 week');
-    const worker = await helper.Worker.create({
-      workerPoolId,
-      workerGroup: 'whatever',
-      workerId: 'whatever',
-      providerId,
-      created: taskcluster.fromNow('-2 weeks'),
-      lastModified: taskcluster.fromNow('-2 weeks'),
-      lastChecked: taskcluster.fromNow('-2 weeks'),
-      capacity: 1,
-      expires,
-      state: helper.Worker.states.RUNNING,
-      providerData: {zone: 'us-east1-a'},
+    test('for a running worker', async function() {
+      await makeWorkerPool();
+      let worker = await suiteMakeWorker({state: 'running'});
+      fake.compute.instances.setFakeInstanceStatus(
+        project, 'us-east1-a', workerId,
+        'RUNNING');
+      worker = await runCheckWorker(worker);
+      assert.equal(worker.state, Worker.states.RUNNING);
     });
-    await provider.scanPrepare();
-    await provider.checkWorker({worker});
-    await provider.scanCleanup();
-    assert(worker.expires > expires);
-  });
 
-  test('remove unregistered workers', async function() {
-    const worker = await helper.Worker.create({
-      workerPoolId,
-      workerGroup: 'whatever',
-      workerId: 'whatever',
-      providerId,
-      capacity: 1,
-      created: taskcluster.fromNow('-1 hour'),
-      lastModified: taskcluster.fromNow('-2 weeks'),
-      lastChecked: taskcluster.fromNow('-2 weeks'),
-      expires: taskcluster.fromNow('1 week'),
-      state: helper.Worker.states.REQUESTED,
-      providerData: {
+    test('for a terminated instance', async function() {
+      await makeWorkerPool();
+      let worker = await suiteMakeWorker({state: 'running'});
+      fake.compute.instances.setFakeInstanceStatus(
+        project, 'us-east1-a', workerId,
+        'TERMINATED');
+      worker = await runCheckWorker(worker);
+      assert.equal(worker.state, Worker.states.STOPPED);
+    });
+
+    test('for a stopped instance', async function() {
+      await makeWorkerPool();
+      let worker = await suiteMakeWorker({state: 'running'});
+      fake.compute.instances.setFakeInstanceStatus(
+        project, 'us-east1-a', workerId,
+        'STOPPED');
+      worker = await runCheckWorker(worker);
+      assert.equal(worker.state, Worker.states.STOPPED);
+    });
+
+    test('for a nonexistent instance', async function() {
+      await makeWorkerPool();
+      let worker = await suiteMakeWorker({state: 'requested'});
+      worker = await runCheckWorker(worker);
+      assert.equal(worker.state, Worker.states.STOPPED);
+    });
+
+    test('for a nonexistent instance with a running operation', async function() {
+      await makeWorkerPool();
+      const operation = fake.compute.zoneOperations.fakeOperation({zone: 'us-east1-a'});
+      let worker = await suiteMakeWorker({state: 'requested', providerData: {operation}});
+      worker = await runCheckWorker(worker);
+      assert.equal(worker.state, Worker.states.REQUESTED);
+    });
+
+    test('for a nonexistent instance with a failed operation', async function() {
+      await makeWorkerPool();
+      const operation = fake.compute.zoneOperations.fakeOperation({
         zone: 'us-east1-a',
-        terminateAfter: Date.now() - 1000,
-      },
-    });
-    await provider.scanPrepare();
-    await provider.checkWorker({worker});
-    await provider.scanCleanup();
-    assert(fakeGoogle.instanceDeleteStub.called);
-  });
-
-  test('don\'t remove unregistered workers that are new', async function() {
-    const worker = await helper.Worker.create({
-      workerPoolId,
-      workerGroup: 'whatever',
-      workerId: 'whatever',
-      providerId,
-      created: taskcluster.fromNow('-1 hour'),
-      expires: taskcluster.fromNow('1 week'),
-      capacity: 1,
-      lastModified: taskcluster.fromNow('-2 weeks'),
-      lastChecked: taskcluster.fromNow('-2 weeks'),
-      state: helper.Worker.states.REQUESTED,
-      providerData: {
-        zone: 'us-east1-a',
-        terminateAfter: Date.now() + 1000,
-      },
-    });
-    await provider.scanPrepare();
-    await provider.checkWorker({worker});
-    await provider.scanCleanup();
-    assert(!fakeGoogle.instanceDeleteStub.called);
-  });
-
-  test('remove very old workers', async function() {
-    const worker = await helper.Worker.create({
-      workerPoolId,
-      workerGroup: 'whatever',
-      workerId: 'whatever',
-      providerId,
-      capacity: 1,
-      created: taskcluster.fromNow('-1 hour'),
-      lastModified: taskcluster.fromNow('-2 weeks'),
-      lastChecked: taskcluster.fromNow('-2 weeks'),
-      expires: taskcluster.fromNow('1 week'),
-      state: helper.Worker.states.REQUESTED,
-      providerData: {
-        zone: 'us-east1-a',
-        terminateAfter: Date.now() - 1000,
-      },
-    });
-    await provider.scanPrepare();
-    await provider.checkWorker({worker});
-    await provider.scanCleanup();
-    assert(fakeGoogle.instanceDeleteStub.called);
-  });
-
-  test('don\'t remove current workers', async function() {
-    const worker = await helper.Worker.create({
-      workerPoolId,
-      workerGroup: 'whatever',
-      workerId: 'whatever',
-      providerId,
-      capacity: 1,
-      created: taskcluster.fromNow('-1 hour'),
-      lastModified: taskcluster.fromNow('-2 weeks'),
-      lastChecked: taskcluster.fromNow('-2 weeks'),
-      expires: taskcluster.fromNow('1 week'),
-      state: helper.Worker.states.REQUESTED,
-      providerData: {
-        zone: 'us-east1-a',
-        terminateAfter: Date.now() + 1000,
-      },
-    });
-    await provider.scanPrepare();
-    await provider.checkWorker({worker});
-    await provider.scanCleanup();
-    assert(!fakeGoogle.instanceDeleteStub.called);
-  });
-
-  suite('_enqueue p-queues', function() {
-    test('non existing queue', async function() {
-      try {
-        await provider._enqueue('nonexisting', () => {});
-      } catch (err) {
-        assert.equal(err.message, 'Unknown p-queue attempted: nonexisting');
-        return;
-      }
-      throw new Error('should have thrown an error');
+        status: 'DONE',
+        error: {
+          errors: [{message: 'uhoh'}],
+        },
+      });
+      let worker = await suiteMakeWorker({state: 'requested', providerData: {operation}});
+      worker = await runCheckWorker(worker);
+      assert.equal(worker.state, Worker.states.STOPPED);
+      const errors = await helper.WorkerPoolError.scan({}, {});
+      assert.equal(errors.entries.length, 1);
+      assert.equal(errors.entries[0].description, 'uhoh');
+      assert.equal(errors.entries[0].title, 'Operation Error');
     });
 
-    test('simple', async function() {
-      const result = await provider._enqueue('query', () => 5);
-      assert.equal(result, 5);
+    test('update expiration for a long-running worker', async function() {
+      const expires = taskcluster.fromNow('-1 week');
+      let worker = await suiteMakeWorker({expires, state: 'running'});
+      fake.compute.instances.setFakeInstanceStatus(
+        project, 'us-east1-a', workerId,
+        'RUNNING');
+      worker = await runCheckWorker(worker);
+      assert(worker.expires > expires);
     });
 
-    test('one 500', async function() {
-      const remote = sinon.stub();
-      remote.onCall(0).throws({code: 500});
-      remote.onCall(1).returns(10);
-      const result = await provider._enqueue('query', () => remote());
-      assert.equal(result, 10);
-      assert.equal(remote.callCount, 2);
-    });
-    test('multiple 500', async function() {
-      const remote = sinon.stub();
-      remote.onCall(0).throws({code: 500});
-      remote.onCall(1).throws({code: 520});
-      remote.onCall(2).throws({code: 503});
-      remote.onCall(3).returns(15);
-      const result = await provider._enqueue('query', () => remote());
-      assert.equal(result, 15);
-      assert.equal(remote.callCount, 4);
-    });
-    test('500s forever should throw', async function() {
-      const remote = sinon.stub();
-      remote.throws({code: 500});
+    test('remove unregistered workers after terminateAfter', async function() {
+      const terminateAfter = Date.now() - 1000;
+      let worker = await suiteMakeWorker({providerData: {terminateAfter}});
+      fake.compute.instances.setFakeInstanceStatus(
+        project, 'us-east1-a', workerId,
+        'RUNNING');
+      worker = await runCheckWorker(worker);
+      assert(fake.compute.instances.delete_called);
 
-      try {
-        await provider._enqueue('query', () => remote());
-      } catch (err) {
-        assert.deepEqual(err, {code: 500});
-        return;
-      }
-      assert.equal(remote.callCount, 5);
-      throw new Error('should have thrown an error');
+      // the worker isn't marked as stopped until we see it disappear
+      assert.equal(worker.state, 'running');
+      worker = await runCheckWorker(worker);
+      assert.equal(worker.state, 'stopped');
+    });
+
+    test('don\'t remove unregistered before terminateAfter', async function() {
+      const terminateAfter = Date.now() + 1000;
+      let worker = await suiteMakeWorker({providerData: {terminateAfter}});
+      fake.compute.instances.setFakeInstanceStatus(
+        project, 'us-east1-a', workerId,
+        'RUNNING');
+      worker = await runCheckWorker(worker);
+      assert(!fake.compute.instances.delete_called);
+      assert.equal(worker.state, 'running');
     });
   });
 
   suite('registerWorker', function() {
-    const workerGroup = providerId;
+    const workerGroup = 'us-east1';
     const workerId = 'abc123';
 
     const defaultWorker = {
@@ -373,7 +546,8 @@ helper.secrets.mockSuite(testing.suiteName(), ['db'], function(mock, skipping) {
     };
 
     test('no token', async function() {
-      const worker = await helper.Worker.create({
+      const workerPool = await makeWorkerPool();
+      const worker = await makeWorker({
         ...defaultWorker,
       });
       const workerIdentityProof = {};
@@ -383,7 +557,8 @@ helper.secrets.mockSuite(testing.suiteName(), ['db'], function(mock, skipping) {
     });
 
     test('invalid token', async function() {
-      const worker = await helper.Worker.create({
+      const workerPool = await makeWorkerPool();
+      const worker = await makeWorker({
         ...defaultWorker,
       });
       const workerIdentityProof = {token: 'invalid'};
@@ -393,7 +568,8 @@ helper.secrets.mockSuite(testing.suiteName(), ['db'], function(mock, skipping) {
     });
 
     test('wrong project', async function() {
-      const worker = await helper.Worker.create({
+      const workerPool = await makeWorkerPool();
+      const worker = await makeWorker({
         ...defaultWorker,
       });
       const workerIdentityProof = {token: 'wrongProject'};
@@ -403,7 +579,8 @@ helper.secrets.mockSuite(testing.suiteName(), ['db'], function(mock, skipping) {
     });
 
     test('wrong sub', async function() {
-      const worker = await helper.Worker.create({
+      const workerPool = await makeWorkerPool();
+      const worker = await makeWorker({
         ...defaultWorker,
       });
       const workerIdentityProof = {token: 'wrongSub'};
@@ -413,7 +590,8 @@ helper.secrets.mockSuite(testing.suiteName(), ['db'], function(mock, skipping) {
     });
 
     test('wrong instance ID', async function() {
-      const worker = await helper.Worker.create({
+      const workerPool = await makeWorkerPool();
+      const worker = await makeWorker({
         ...defaultWorker,
       });
       const workerIdentityProof = {token: 'wrongId'};
@@ -423,7 +601,8 @@ helper.secrets.mockSuite(testing.suiteName(), ['db'], function(mock, skipping) {
     });
 
     test('wrong worker state (duplicate call to registerWorker)', async function() {
-      const worker = await helper.Worker.create({
+      const workerPool = await makeWorkerPool();
+      const worker = await makeWorker({
         ...defaultWorker,
         state: 'running',
       });
@@ -434,7 +613,8 @@ helper.secrets.mockSuite(testing.suiteName(), ['db'], function(mock, skipping) {
     });
 
     test('sweet success', async function() {
-      const worker = await helper.Worker.create({
+      const workerPool = await makeWorkerPool();
+      const worker = await makeWorker({
         ...defaultWorker,
         providerData: {
           workerConfig: {
@@ -451,7 +631,8 @@ helper.secrets.mockSuite(testing.suiteName(), ['db'], function(mock, skipping) {
     });
 
     test('sweet success (different reregister)', async function() {
-      const worker = await helper.Worker.create({
+      const workerPool = await makeWorkerPool();
+      const worker = await makeWorker({
         ...defaultWorker,
         providerData: {
           reregistrationTimeout: 3600 * 10 * 1000,

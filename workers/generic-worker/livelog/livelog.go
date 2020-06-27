@@ -7,7 +7,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"net"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/taskcluster/slugid-go/slugid"
+	"github.com/taskcluster/taskcluster/v31/workers/generic-worker/tchttputil"
 )
 
 // LiveLog provides access to a livelog process running on the OS. Use
@@ -33,6 +34,7 @@ type LiveLog struct {
 	LogWriter io.WriteCloser
 	mutex     sync.Mutex
 	command   *exec.Cmd
+	done      chan (struct{})
 }
 
 // New starts a livelog OS process using the executable specified, and returns
@@ -46,6 +48,7 @@ func New(liveLogExecutable string, putPort, getPort uint16) (*LiveLog, error) {
 		command: exec.Command(liveLogExecutable),
 		PUTPort: putPort,
 		GETPort: getPort,
+		done:    make(chan (struct{})),
 	}
 	l.setRequestURLs()
 
@@ -92,6 +95,13 @@ func New(liveLogExecutable string, putPort, getPort uint16) (*LiveLog, error) {
 
 	select {
 	case err := <-inputStreamConnectionResult:
+		go func() {
+			select {
+			case <-l.done:
+			case pr := <-putResult:
+				log.Printf("WARNING: Livelog failure: error '%v' and livelog output:\n%s", pr.e, pr.b)
+			}
+		}()
 		if err != nil {
 			return nil, err
 		}
@@ -111,6 +121,7 @@ func (l *LiveLog) Terminate() error {
 	// i.e DON'T write `l.logReader.Close()`
 	l.LogWriter.Close()
 	l.mutex.Lock()
+	close(l.done)
 	defer l.mutex.Unlock()
 	return l.command.Process.Kill()
 }
@@ -132,9 +143,9 @@ func (l *LiveLog) connectInputStream() error {
 	// livelog process has started...
 	// Note we can't wait for GET port to be active before returning since
 	// livelog will only serve from that port once some content is sent - so no
-	// good to execute waitForPortToBeActive(l.getPort) here...  We would need
-	// to fix this in livelog codebase not here...
-	err = waitForPortToBeActive(l.PUTPort, time.Minute*1)
+	// good to execute tchttputil.WaitForLocalTCPListener(l.getPort) here...  We
+	// would need to fix this in livelog codebase not here...
+	err = tchttputil.WaitForLocalTCPListener(l.PUTPort, time.Minute*1)
 	if err != nil {
 		return err
 	}
@@ -147,18 +158,4 @@ func (l *LiveLog) connectInputStream() error {
 		}
 	}()
 	return nil
-}
-
-func waitForPortToBeActive(port uint16, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", "localhost:"+strconv.Itoa(int(port)), 60*time.Second)
-		if err != nil {
-			time.Sleep(100 * time.Millisecond)
-		} else {
-			_ = conn.Close()
-			return nil
-		}
-	}
-	return fmt.Errorf("Timed out waiting for port %v to be active after %v", port, timeout)
 }

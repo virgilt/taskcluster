@@ -1,5 +1,7 @@
 const assert = require('assert');
 const libUrls = require('taskcluster-lib-urls');
+const slugid = require('slugid');
+const yaml = require('js-yaml');
 
 /**
  * The parent class for all providers.
@@ -10,11 +12,11 @@ class Provider {
   constructor({
     providerId,
     notify,
+    db,
     monitor,
     rootUrl,
     estimator,
     Worker,
-    WorkerPool,
     WorkerPoolError,
     validator,
     providerConfig,
@@ -23,10 +25,10 @@ class Provider {
     this.monitor = monitor;
     this.validator = validator;
     this.notify = notify;
+    this.db = db;
     this.rootUrl = rootUrl;
     this.estimator = estimator;
     this.Worker = Worker;
-    this.WorkerPool = WorkerPool;
     this.WorkerPoolError = WorkerPoolError;
   }
 
@@ -73,7 +75,7 @@ class Provider {
     throw new ApiError('not supported for this provider');
   }
 
-  async removeWorker({worker}) {
+  async removeWorker({worker, reason}) {
     throw new ApiError('not supported for this provider');
   }
 
@@ -92,23 +94,72 @@ class Provider {
    * supports this action. Also returns the reregistrationTimeout
    * in milliseconds (as opposed to the seconds it is defined in) for
    * doing date math with easier.
+   * This defaults reregistrationTimeout to 4 days. Note that
+   * this is also set in the lifecycle schema so update there if
+   * changing.
    */
-  static interpretLifecycle({lifecycle}) {
+  static interpretLifecycle({lifecycle: {registrationTimeout, reregistrationTimeout} = {}}) {
+    reregistrationTimeout = reregistrationTimeout || 345600;
     let terminateAfter = null;
-    if (!lifecycle) {
-      return {terminateAfter, reregistrationTimeout: null};
-    }
 
-    let {registrationTimeout, reregistrationTimeout} = lifecycle;
-    if (registrationTimeout !== undefined) {
+    if (registrationTimeout !== undefined && registrationTimeout < reregistrationTimeout) {
       terminateAfter = Date.now() + registrationTimeout * 1000;
-    }
-    if (reregistrationTimeout !== undefined && registrationTimeout === undefined ||
-        reregistrationTimeout < registrationTimeout) {
+    } else {
       terminateAfter = Date.now() + reregistrationTimeout * 1000;
     }
-    return {terminateAfter, reregistrationTimeout: reregistrationTimeout * 1000 || null};
+
+    return {terminateAfter, reregistrationTimeout: reregistrationTimeout * 1000};
   }
+
+  // Report an error concerning this worker pool.  This handles notifications and logging.
+  async reportError({workerPool, kind, title, description, extra = {}}) {
+    const errorId = slugid.v4();
+
+    try {
+      if (workerPool.emailOnError) {
+        await this.notify.email({
+          address: workerPool.owner,
+          subject: `Taskcluster Worker Manager Error: ${title}`,
+          content: getExtraInfo({extra, description, workerPoolId: workerPool.workerPoolId, errorId}),
+        });
+      }
+
+      await this.monitor.log.workerError({
+        workerPoolId: workerPool.workerPoolId,
+        errorId,
+        reported: new Date(),
+        kind,
+        title,
+        description,
+      });
+
+    } finally {
+      // eslint-disable-next-line no-unsafe-finally
+      return await this.WorkerPoolError.create({
+        workerPoolId: workerPool.workerPoolId,
+        errorId,
+        reported: new Date(),
+        kind,
+        title,
+        description,
+        extra,
+      });
+    }
+  }
+
+  /**
+   * Create a monitor object suitable for logging about a worker
+   */
+  workerMonitor({worker, extra = {}}) {
+    return this.monitor.childMonitor({
+      workerPoolId: worker.workerPoolId,
+      providerId: worker.providerId,
+      workerGroup: worker.workerGroup,
+      workerId: worker.workerId,
+      ...extra,
+    });
+  }
+
 }
 
 /**
@@ -121,4 +172,30 @@ class ApiError extends Error {
 module.exports = {
   Provider,
   ApiError,
+};
+
+// Utility function for reportError
+const getExtraInfo = ({extra, workerPoolId, description, errorId}) => {
+  let extraInfo = '';
+  if (Object.keys(extra).length) {
+    extraInfo = `
+It includes the extra information:
+
+\`\`\`
+${yaml.safeDump(extra)}
+\`\`\`
+      `.trim();
+  }
+
+  return `Worker Manager has encountered an error while trying to provision the worker pool ${workerPoolId}:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+${description}
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+ErrorId: ${errorId}
+
+${extraInfo}`.trim();
 };

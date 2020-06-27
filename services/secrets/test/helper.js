@@ -16,7 +16,6 @@ withMonitor(exports);
 
 // set up the testing secrets
 exports.secrets = new Secrets({
-  secretName: 'project/taskcluster/testing/azure',
   secrets: {
     db: withDb.secret,
   },
@@ -73,6 +72,7 @@ exports.withServer = (mock, skipping) => {
       return new SecretsClient({
         credentials: {clientId, accessToken: 'unused'},
         rootUrl,
+        retries: 0,
       });
     };
 

@@ -6,12 +6,12 @@ const uuid = require('uuid');
 const {google} = require('googleapis');
 const {ApiError, Provider} = require('./provider');
 const {CloudAPI} = require('./cloudapi');
+const {WorkerPool, Worker} = require('../data');
 
 class GoogleProvider extends Provider {
 
   constructor({
     providerConfig,
-    fakeCloudApis,
     ...conf
   }) {
     super({providerConfig, ...conf});
@@ -48,14 +48,6 @@ class GoogleProvider extends Provider {
       },
     });
     this._enqueue = cloud.enqueue.bind(cloud);
-
-    if (fakeCloudApis && fakeCloudApis.google) {
-      this.ownClientEmail = 'whatever@example.com';
-      this.compute = fakeCloudApis.google.compute();
-      this.iam = fakeCloudApis.google.iam();
-      this.oauth2 = new fakeCloudApis.google.OAuth2({project});
-      return;
-    }
 
     // If creds are a string or a base64d string, parse them
     if (_.isString(creds)) {
@@ -95,6 +87,7 @@ class GoogleProvider extends Provider {
 
   async registerWorker({worker, workerPool, workerIdentityProof}) {
     const {token} = workerIdentityProof;
+    const monitor = this.workerMonitor({worker});
 
     // use the same message for all errors here, so as not to give an attacker
     // extra information.
@@ -137,7 +130,7 @@ class GoogleProvider extends Provider {
       throw error();
     }
 
-    if (worker.state !== this.Worker.states.REQUESTED) {
+    if (worker.state !== Worker.states.REQUESTED) {
       throw error();
     }
 
@@ -151,15 +144,20 @@ class GoogleProvider extends Provider {
       providerId: this.providerId,
       workerId: worker.workerId,
     });
-    await worker.modify(w => {
-      w.lastModified = new Date();
-      w.state = this.Worker.states.RUNNING;
-      w.providerData.terminateAfter = expires.getTime();
+    monitor.debug('setting state to RUNNING');
+
+    await worker.update(this.db, worker => {
+      worker.state = Worker.states.RUNNING;
+      worker.providerData.terminateAfter = expires.getTime();
+      worker.lastModified = new Date();
     });
 
     // assume for the moment that workers self-terminate before 96 hours
     const workerConfig = worker.providerData.workerConfig || {};
-    return {expires, workerConfig};
+    return {
+      expires,
+      workerConfig,
+    };
   }
 
   async deprovision({workerPool}) {
@@ -167,13 +165,16 @@ class GoogleProvider extends Provider {
   }
 
   async removeResources({workerPool}) {
-    // remove any remaining providerData when we are no longer responsible for this workerPool
-    await workerPool.modify(wt => {
-      delete wt.providerData[this.providerId];
-    });
   }
 
-  async removeWorker({worker}) {
+  async removeWorker({worker, reason}) {
+    this.monitor.log.workerRemoved({
+      workerPoolId: worker.workerPoolId,
+      providerId: worker.providerId,
+      workerId: worker.workerId,
+      reason,
+    });
+
     try {
       // This returns an operation that we could track but the chances
       // that this fails due to user input being wrong are low so
@@ -196,9 +197,8 @@ class GoogleProvider extends Provider {
     const {workerPoolId} = workerPool;
 
     if (!workerPool.providerData[this.providerId]) {
-      await workerPool.modify(wt => {
-        wt.providerData[this.providerId] = wt.providerData[this.providerId] || {};
-      });
+      await this.db.fns.update_worker_pool_provider_data(
+        workerPool.workerPoolId, this.providerId, {});
     }
 
     let toSpawn = await this.estimator.simple({
@@ -227,6 +227,7 @@ class GoogleProvider extends Provider {
       // workers in taskcluster.
       const poolName = workerPoolId.replace(/[\/_]/g, '-').slice(0, 38);
       const instanceName = `${poolName}-${slugid.nice().replace(/_/g, '-').toLowerCase()}`;
+      const workerGroup = cfg.region;
       const labels = {
         'created-by': `taskcluster-wm-${this.providerId}`.replace(/[^a-zA-Z0-9-]/g, '-'),
         'managed-by': 'taskcluster',
@@ -235,23 +236,27 @@ class GoogleProvider extends Provider {
       };
       let op;
 
+      const disks = [
+        ...cfg.disks || {},
+      ];
+      for (let disk of disks) {
+        disk.labels = {...disk.labels, ...labels};
+      }
+
       try {
         const res = await this._enqueue('query', () => this.compute.instances.insert({
           project: this.project,
           zone: cfg.zone,
           requestId: uuid.v4(), // This is just for idempotency
           requestBody: {
-            ...cfg, // We spread this in first so that users can't override stuff we set below
+            ..._.omit(cfg, ['region', 'zone', 'workerConfig', 'capacityPerInstance']),
             name: instanceName,
             labels: {
               ...cfg.labels || {},
               ...labels,
             },
             description: cfg.description || workerPool.description,
-            disks: {
-              ...cfg.disks || {},
-              labels,
-            },
+            disks,
             serviceAccounts: [{
               email: this.workerServiceAccountEmail,
               scopes: [
@@ -280,7 +285,7 @@ class GoogleProvider extends Provider {
                   value: JSON.stringify({
                     workerPoolId,
                     providerId: this.providerId,
-                    workerGroup: this.providerId,
+                    workerGroup,
                     rootUrl: this.rootUrl,
                     // NOTE: workerConfig is deprecated and isn't used after worker-runner v29.0.1
                     workerConfig: cfg.workerConfig || {},
@@ -296,7 +301,8 @@ class GoogleProvider extends Provider {
           throw err;
         }
         for (const error of err.errors) {
-          await workerPool.reportError({
+          await this.reportError({
+            workerPool,
             kind: 'creation-error',
             title: 'Instance Creation Error',
             description: error.message,
@@ -308,20 +314,16 @@ class GoogleProvider extends Provider {
       this.monitor.log.workerRequested({
         workerPoolId,
         providerId: this.providerId,
-        workerGroup: this.providerId,
+        workerGroup,
         workerId: op.targetId,
       });
-      const now = new Date();
-      await this.Worker.create({
+      const worker = Worker.fromApi({
         workerPoolId,
         providerId: this.providerId,
-        workerGroup: this.providerId,
+        workerGroup,
         workerId: op.targetId,
-        created: now,
-        lastModified: now,
-        lastChecked: now,
         expires: taskcluster.fromNow('1 week'),
-        state: this.Worker.states.REQUESTED,
+        state: Worker.states.REQUESTED,
         capacity: cfg.capacityPerInstance,
         providerData: {
           project: this.project,
@@ -335,6 +337,7 @@ class GoogleProvider extends Provider {
           workerConfig: cfg.workerConfig || {},
         },
       });
+      await worker.create(this.db);
     }));
   }
 
@@ -351,9 +354,11 @@ class GoogleProvider extends Provider {
    * the worker locally
    */
   async checkWorker({worker}) {
-    const states = this.Worker.states;
+    const states = Worker.states;
     this.seen[worker.workerPoolId] = this.seen[worker.workerPoolId] || 0;
     this.errors[worker.workerPoolId] = this.errors[worker.workerPoolId] || [];
+
+    const monitor = this.workerMonitor({worker});
 
     let state = worker.state;
     try {
@@ -363,6 +368,7 @@ class GoogleProvider extends Provider {
         instance: worker.workerId,
       }));
       const {status} = data;
+      monitor.debug(`instance status is ${status}`);
       if (['PROVISIONING', 'STAGING', 'RUNNING'].includes(status)) {
         this.seen[worker.workerPoolId] += worker.capacity || 1;
 
@@ -371,12 +377,12 @@ class GoogleProvider extends Provider {
         // long-lived instances become orphaned from the provider. We don't update
         // this on every loop just to avoid the extra work when not needed
         if (worker.expires < taskcluster.fromNow('1 day')) {
-          await worker.modify(w => {
-            w.expires = taskcluster.fromNow('1 week');
+          await worker.update(this.db, worker => {
+            worker.expires = taskcluster.fromNow('1 week');
           });
         }
         if (worker.providerData.terminateAfter && worker.providerData.terminateAfter < Date.now()) {
-          await this.removeWorker({worker});
+          await this.removeWorker({worker, reason: 'terminateAfter time exceeded'});
         }
       } else if (['TERMINATED', 'STOPPED'].includes(status)) {
         await this._enqueue('query', () => this.compute.instances.delete({
@@ -395,13 +401,19 @@ class GoogleProvider extends Provider {
       if (err.code !== 404) {
         throw err;
       }
+      monitor.debug(`instance status not found`);
       if (worker.providerData.operation) {
         // We only check in on the operation if the worker failed to
         // start succesfully
-        await this.handleOperation({
+        if (await this.handleOperation({
           op: worker.providerData.operation,
           errors: this.errors[worker.workerPoolId],
-        });
+          monitor,
+        })) {
+          monitor.debug('operation still running');
+          // return to poll the operation again..
+          return;
+        }
       }
       this.monitor.log.workerStopped({
         workerPoolId: worker.workerPoolId,
@@ -410,13 +422,12 @@ class GoogleProvider extends Provider {
       });
       state = states.STOPPED;
     }
-    await worker.modify(w => {
-      const now = new Date();
-      if (w.state !== state) {
-        w.lastModified = now;
-      }
-      w.lastChecked = now;
-      w.state = state;
+    monitor.debug(`setting state to ${state}`);
+    const now = new Date();
+    await worker.update(this.db, worker => {
+      worker.state = state;
+      worker.lastModified = worker.state !== state ? now : null;
+      worker.lastChecked = now;
     });
   }
 
@@ -426,16 +437,13 @@ class GoogleProvider extends Provider {
   async scanCleanup() {
     this.monitor.log.scanSeen({providerId: this.providerId, seen: this.seen});
     await Promise.all(Object.entries(this.seen).map(async ([workerPoolId, seen]) => {
-      const workerPool = await this.WorkerPool.load({
-        workerPoolId,
-      }, true);
-
+      const workerPool = await WorkerPool.get(this.db, workerPoolId);
       if (!workerPool) {
         return; // In this case, the workertype has been deleted so we can just move on
       }
 
       if (this.errors[workerPoolId].length) {
-        await Promise.all(this.errors[workerPoolId].map(error => workerPool.reportError(error)));
+        await Promise.all(this.errors[workerPoolId].map(error => this.reportError({workerPool, ...error})));
       }
     }));
   }
@@ -447,10 +455,12 @@ class GoogleProvider extends Provider {
    * operations when we create them. This is just a nice-to-have for
    * reporting configuration/provisioning errors to the users.
    *
+   * Returns true if the operation is not done yet.
+   *
    * op: an object with keys `name` and optionally `region` or `zone` if it is a region or zone based operation
    * errors: a list that will have any errors found for that operation appended to it
    */
-  async handleOperation({op, errors}) {
+  async handleOperation({op, errors, monitor}) {
     let operation;
     let opService;
     const args = {
@@ -468,6 +478,7 @@ class GoogleProvider extends Provider {
     }
 
     try {
+      // https://cloud.google.com/compute/docs/reference/rest/v1/regionOperations
       operation = (await this._enqueue('opRead', () => opService.get(args))).data;
     } catch (err) {
       if (err.code !== 404) {
@@ -477,8 +488,10 @@ class GoogleProvider extends Provider {
       return false;
     }
 
-    // Let's check back in on the next provisioning iteration if unfinished
+    // Let's check back in on the next provisioning iteration if unfinished (other options
+    // are PENDING and RUNNING)
     if (operation.status !== 'DONE') {
+      monitor.debug(`operation status ${operation.status} is not DONE`);
       return true;
     }
 

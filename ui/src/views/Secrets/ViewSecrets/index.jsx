@@ -6,6 +6,7 @@ import Spinner from '@mozilla-frontend-infra/components/Spinner';
 import { withStyles } from '@material-ui/core/styles';
 import PlusIcon from 'mdi-react/PlusIcon';
 import escapeStringRegexp from 'escape-string-regexp';
+import qs from 'qs';
 import Dashboard from '../../../components/Dashboard';
 import Search from '../../../components/Search';
 import SecretsTable from '../../../components/SecretsTable';
@@ -17,14 +18,21 @@ import secretsQuery from './secrets.graphql';
 
 @hot(module)
 @graphql(secretsQuery, {
-  options: () => ({
-    fetchPolicy: 'network-only',
-    variables: {
-      secretsConnection: {
-        limit: VIEW_SECRETS_PAGE_SIZE,
+  options: props => {
+    const { search } = qs.parse(props.location.search.slice(1));
+
+    return {
+      fetchPolicy: 'network-only',
+      variables: {
+        secretsConnection: {
+          limit: VIEW_SECRETS_PAGE_SIZE,
+        },
+        filter: search
+          ? { name: { $regex: escapeStringRegexp(search), $options: 'i' } }
+          : null,
       },
-    },
-  }),
+    };
+  },
 })
 @withStyles(theme => ({
   plusIconSpan: {
@@ -32,24 +40,27 @@ import secretsQuery from './secrets.graphql';
   },
 }))
 export default class ViewSecrets extends Component {
-  state = {
-    secretSearch: '',
-  };
-
-  handleSecretSearchSubmit = secretSearch => {
+  handleSecretSearchSubmit = async secretSearch => {
     const {
       data: { refetch },
     } = this.props;
 
-    this.setState({ secretSearch });
-
-    refetch({
+    await refetch({
       secretsConnection: {
         limit: VIEW_SECRETS_PAGE_SIZE,
       },
       filter: secretSearch
         ? { name: { $regex: escapeStringRegexp(secretSearch), $options: 'i' } }
         : null,
+    });
+
+    const query = qs.parse(window.location.search.slice(1));
+
+    this.props.history.push({
+      search: qs.stringify({
+        ...query,
+        search: secretSearch,
+      }),
     });
   };
 
@@ -61,6 +72,8 @@ export default class ViewSecrets extends Component {
     const {
       data: { fetchMore },
     } = this.props;
+    const query = qs.parse(this.props.location.search.slice(1));
+    const secretSearch = query.search;
 
     return fetchMore({
       query: secretsQuery,
@@ -70,10 +83,10 @@ export default class ViewSecrets extends Component {
           cursor,
           previousCursor,
         },
-        filter: this.state.secretSearch
+        filter: secretSearch
           ? {
               name: {
-                $regex: escapeStringRegexp(this.state.secretSearch),
+                $regex: escapeStringRegexp(secretSearch),
                 $options: 'i',
               },
             }
@@ -99,6 +112,8 @@ export default class ViewSecrets extends Component {
       description,
       data: { loading, error, secrets },
     } = this.props;
+    const query = qs.parse(this.props.location.search.slice(1));
+    const secretSearch = query.search;
 
     return (
       <Dashboard
@@ -107,6 +122,7 @@ export default class ViewSecrets extends Component {
         search={
           <Search
             disabled={loading}
+            defaultValue={secretSearch}
             onSubmit={this.handleSecretSearchSubmit}
             placeholder="Secret contains"
           />
@@ -116,6 +132,7 @@ export default class ViewSecrets extends Component {
           <ErrorPanel fixed error={error} />
           {secrets && (
             <SecretsTable
+              searchTerm={secretSearch}
               onPageChange={this.handlePageChange}
               secretsConnection={secrets}
             />

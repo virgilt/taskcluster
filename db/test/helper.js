@@ -1,13 +1,13 @@
 const assert = require('assert');
 const {Pool} = require('pg');
-const {WRITE} = require('taskcluster-lib-postgres');
+const {WRITE, ignorePgErrors} = require('taskcluster-lib-postgres');
 const {resetDb} = require('taskcluster-lib-testing');
 const tcdb = require('taskcluster-db');
 const debug = require('debug')('db-helper');
 const {UNDEFINED_TABLE} = require('taskcluster-lib-postgres');
 
 exports.dbUrl = process.env.TEST_DB_URL;
-assert(exports.dbUrl, "TEST_DB_URL must be set to run db/ tests");
+assert(exports.dbUrl, "TEST_DB_URL must be set to run db/ tests - see dev-docs/development-process.md for more information");
 
 /**
  * Set up to test a DB version.
@@ -16,6 +16,8 @@ assert(exports.dbUrl, "TEST_DB_URL must be set to run db/ tests");
  * - helper.withDbClient(fn) to call fn with a pg client.
  * - helper.upgradeTo(v) to upgrade to the given version.
  * - helper.downgradeTo(v) to downgrade to the given version.
+ * - helper.toDbVersion(v) to upgrade or downgrade as necessary to the given version
+ * - helper.setupDb(serviceName) returns a setup Database object for that service
  *
  * The database is only reset at the beginning of the suite.  Test suites
  * should implement a `setup` method that sets state for all relevant tables
@@ -23,6 +25,7 @@ assert(exports.dbUrl, "TEST_DB_URL must be set to run db/ tests");
  */
 exports.withDbForVersion = function() {
   let pool;
+  let dbs = {};
 
   suiteSetup('setup database', async function() {
     pool = new Pool({connectionString: exports.dbUrl});
@@ -47,6 +50,29 @@ exports.withDbForVersion = function() {
       }
     };
 
+    exports.setupDb = async serviceName => {
+      if (dbs[serviceName]) {
+        return dbs[serviceName];
+      }
+      const db = await tcdb.setup({
+        writeDbUrl: exports.dbUrl,
+        readDbUrl: exports.dbUrl,
+        serviceName,
+        useDbDirectory: true,
+        monitor: false,
+        dbCryptoKeys: [
+          {
+            id: 'db-tests',
+            algo: 'aes-256',
+            // only used for tests
+            key: 'aSdtIGJzdGFjayEgaGVsbG8gZnV0dXJlIHBlcnNvbgo',
+          },
+        ],
+      });
+      dbs[serviceName] = db;
+      return db;
+    };
+
     exports.upgradeTo = async (toVersion) => {
       await tcdb.upgrade({
         adminDbUrl: exports.dbUrl,
@@ -65,6 +91,22 @@ exports.withDbForVersion = function() {
       });
     };
 
+    exports.toDbVersion = async (toVersion) => {
+      await tcdb.upgrade({
+        adminDbUrl: exports.dbUrl,
+        toVersion,
+        usernamePrefix: 'test',
+        useDbDirectory: true,
+      });
+
+      await tcdb.downgrade({
+        adminDbUrl: exports.dbUrl,
+        toVersion,
+        usernamePrefix: 'test',
+        useDbDirectory: true,
+      });
+    };
+
     await resetDb({testDbUrl: exports.dbUrl});
   });
 
@@ -73,8 +115,14 @@ exports.withDbForVersion = function() {
       await pool.end();
     }
     pool = null;
+    for (let db of Object.values(dbs)) {
+      await db.close();
+    }
+    dbs = {};
+
     delete exports.upgradeDb;
     delete exports.withDbClient;
+    delete exports.getDb;
   });
 };
 
@@ -96,10 +144,26 @@ exports.withDbForProcs = function({ serviceName }) {
       serviceName,
       useDbDirectory: true,
       monitor: false,
+      dbCryptoKeys: [
+        {
+          id: 'db-tests',
+          algo: 'aes-256',
+          // only used for tests
+          key: 'aSdtIGJzdGFjayEgaGVsbG8gZnV0dXJlIHBlcnNvbgo',
+        },
+      ],
     });
 
     exports.fakeDb = await tcdb.fakeSetup({
       serviceName,
+      dbCryptoKeys: [
+        {
+          id: 'db-tests',
+          algo: 'aes-256',
+          // only used for tests
+          key: 'aSdtIGJzdGFjayEgaGVsbG8gZnV0dXJlIHBlcnNvbgo',
+        },
+      ],
     });
 
     exports.withDbClient = fn => db._withClient(WRITE, fn);
@@ -191,3 +255,214 @@ exports.azureTableNames = [
   'WMWorkerPools',
   'WMWorkerPoolErrors',
 ];
+
+/**
+ * Define a bunch of tests to ensure that entity methods remain well-behaved as the table
+ * behind them is upgraded to a "normal" postgres table.
+ */
+exports.testEntityTable = ({
+  // the DB version being tested
+  dbVersion,
+  // serviceName (used to set up the Database)
+  serviceName,
+  // entity table name and new normal table name
+  entityTableName, newTableName,
+  // Entity class
+  EntityClass,
+  // named sample values, each given as an object containing entity properties
+  samples,
+  // array of {condition, expectedSample} where condition are passed to load,
+  // and expectedSample is the name of the sample that should be returned
+  loadConditions,
+  // array of {condition, expectedSamples} where condition are passed to scan,
+  // and expectedSamples is an array of names of the expected samples, in order.
+  scanConditions,
+  // array of {condition} that should return no results from load
+  notFoundConditions,
+  // things to skip because they are not implemented; options are 'create-overwrite'
+  // 'remove-ignore-if-not-exists' (add yours here!)
+  notImplemented = [],
+  // array of {condition, modifier, checker} where condition are suitable to
+  // load a single sample, modififer is suitable for Entity.modify, and checker
+  // asserts the resulting entity was modified correctly.  If modifier is an array,
+  // it is treated as a collection of modifier functions to run in parallel to check
+  // support for concurrent modifications.
+  modifications,
+  // customTests can define additional test cases in the usual Mocha style.  The
+  // parameter is true if the tests are run for THIS_VERSION, otherwise for PREV_VERSION.
+}, customTests = (isThisVersion) => {}) => {
+  const prevVersion = dbVersion - 1;
+  // NOTE: these tests must run in order
+  suite(`entity methods for ${entityTableName} / ${newTableName}`, function() {
+    let Entity;
+    let db;
+
+    const resetTables = async () => {
+      await exports.withDbClient(async client => {
+        for (let tableName of [entityTableName, newTableName]) {
+          await ignorePgErrors(client.query(`truncate ${tableName}`), UNDEFINED_TABLE);
+        }
+      });
+    };
+
+    suiteSetup(async function() {
+      db = await exports.setupDb(serviceName);
+      Entity = await EntityClass.setup({
+        db,
+        serviceName: 'test',
+        tableName: entityTableName,
+        monitor: false,
+        context: {},
+      });
+    });
+
+    const makeTests = () => {
+      if (!notImplemented.includes('create-overwrite')) {
+        test(`re-create entries, overwriting them`, async function() {
+          for (let sample of Object.values(samples)) {
+            await Entity.create(sample, true);
+          }
+        });
+      }
+
+      for (let {condition, expectedSample} of loadConditions) {
+        test(`load ${JSON.stringify(condition)}`, async function() {
+          const entity = await Entity.load(condition);
+          assert.deepEqual(entity._properties, samples[expectedSample]);
+        });
+      }
+
+      for (let {condition} of notFoundConditions) {
+        test(`load ${JSON.stringify(condition)} (not found)`, async function() {
+          const entity = await Entity.load(condition, true);
+          assert.deepEqual(entity, undefined);
+          await assert.rejects(
+            () => Entity.load(condition),
+            err => err.code === 'ResourceNotFound');
+        });
+      }
+
+      for (let {condition, expectedSamples} of scanConditions) {
+        test(`scan ${JSON.stringify(condition)} (${expectedSamples.length} results)`, async function() {
+          const res = await Entity.scan(condition);
+          const expected = expectedSamples.map(n => samples[n]);
+          assert.deepEqual(res.entries.map(e => e._properties), expected);
+        });
+
+        if (expectedSamples.length > 1) {
+          test(`scan ${JSON.stringify(condition)} (${expectedSamples.length} results) with pagination`, async function() {
+            const batches = [];
+            const query = {limit: 1};
+            while (true) {
+              const res = await Entity.scan(condition, query);
+              batches.push(res.entries.map(e => e._properties));
+              if (res.continuation) {
+                query.continuation = res.continuation;
+              } else {
+                break;
+              }
+            }
+            const expected = expectedSamples.map(n => [samples[n]]);
+            assert.deepEqual(batches, expected);
+          });
+        }
+      }
+
+      for (let {condition, modifier, checker} of modifications) {
+        if (!Array.isArray(modifier)) {
+          modifier = [modifier];
+        }
+        test(`modify ${JSON.stringify(condition)}`, async function() {
+          const ent = await Entity.load(condition);
+          await Promise.all(modifier.map(mod => ent.modify(mod)));
+          const ent3 = await Entity.load(condition);
+          checker(ent3);
+        });
+      }
+
+      for (let {condition} of loadConditions) {
+        test(`remove ${JSON.stringify(condition)}`, async function() {
+          await Entity.remove(condition);
+          const entity = await Entity.load(condition, true);
+          assert.equal(entity, undefined);
+
+          if (notImplemented.includes('remove-ignore-if-not-exists')) {
+            return;
+          }
+
+          // set ignoreIfNotExists (should not reject)
+          await Entity.remove(condition, true);
+
+          await assert.rejects(
+            () => Entity.remove(condition),
+            err => err.code === 'ResourceNotFound');
+        });
+      }
+    };
+
+    suite(`db version ${prevVersion}`, function() {
+      suiteSetup(async function() {
+        await exports.upgradeTo(prevVersion);
+      });
+
+      setup(async function() {
+        await resetTables();
+        await Promise.all(Object.values(samples).map(
+          sample => Entity.create(sample)));
+      });
+
+      makeTests.call(this);
+      customTests.call(this, false);
+    });
+
+    suite(`db version ${prevVersion} -> ${dbVersion} preserves data`, function() {
+      suiteSetup(async function() {
+        await resetTables();
+        await Promise.all(Object.values(samples).map(
+          sample => Entity.create(sample)));
+        await exports.upgradeTo(dbVersion);
+      });
+
+      for (let {condition, expectedSample} of loadConditions) {
+        test(`load ${JSON.stringify(condition)}`, async function() {
+          const entity = await Entity.load(condition);
+          assert.deepEqual(entity._properties, samples[expectedSample]);
+        });
+      }
+    });
+
+    suite(`db version ${dbVersion}`, function() {
+      suiteSetup(async function() {
+        await exports.upgradeTo(dbVersion);
+      });
+
+      setup(async function() {
+        await resetTables();
+        await Promise.all(Object.values(samples).map(
+          sample => {
+            return Entity.create(sample);
+          }));
+      });
+
+      makeTests();
+      customTests.call(this, true);
+    });
+
+    suite(`db version ${dbVersion} -> ${prevVersion} preserves data`, function() {
+      suiteSetup(async function() {
+        await exports.upgradeTo(dbVersion);
+        await resetTables();
+        await Promise.all(Object.values(samples).map(
+          sample => Entity.create(sample)));
+        await exports.downgradeTo(prevVersion);
+      });
+
+      for (let {condition, expectedSample} of loadConditions) {
+        test(`load ${JSON.stringify(condition)}`, async function() {
+          const entity = await Entity.load(condition);
+          assert.deepEqual(entity._properties, samples[expectedSample]);
+        });
+      }
+    });
+  });
+};
